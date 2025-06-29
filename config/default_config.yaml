@@ -1,0 +1,19 @@
+# 基本設定
+map: data/maps/simple_room.npy
+sff: data/sff/distance_L1.npy
+N: 300
+save_log: output/logs/umeda_run1.npy
+save_config: output/logs/run_config_used.yaml
+save_interval: 100 # 将来的に使うかも
+
+# モデルパラメータ
+params:
+  k_S: 10
+  k_D: 1
+  diffuse: 0.2
+  decay: 0.2
+  # neighborhood: moore
+  neighborhood: neumann
+
+# 実験情報
+seed: 42
