@@ -1,0 +1,13 @@
+map: data/maps/simple_room.npy
+sff: data/sff/distance_L1.npy
+N: 300
+
+params:
+  k_S: 3
+  k_D: 1
+  diffuse: 0.2
+  decay: 0.2
+  # neighborhood: moore
+  neighborhood: neumann
+
+seed: 42
