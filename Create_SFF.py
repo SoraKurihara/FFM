@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ファイルの読み込み
-cell_map = np.load("simple_room.npy")
+cell_map = np.load(r"data/maps/simple_room.npy")
 
 # 出口（値が3）の座標を取得
 exit_positions = np.argwhere(cell_map == 3)
@@ -18,7 +18,7 @@ dist_Linf = np.full((height, width), np.inf)
 # すべてのセルに対して、距離を計算
 for i in range(height):
     for j in range(width):
-        if cell_map[i, j] == 0:  # 通路のみ対象
+        if (cell_map[i, j] == 0) | (cell_map[i, j] == 3):  # 通路のみ対象
             for ex, ey in exit_positions:
                 # L1距離（マンハッタン）
                 d1 = abs(i - ex) + abs(j - ey)
@@ -31,6 +31,8 @@ for i in range(height):
                 dist_L1[i, j] = min(dist_L1[i, j], d1)
                 dist_L2[i, j] = min(dist_L2[i, j], d2)
                 dist_Linf[i, j] = min(dist_Linf[i, j], d_inf)
+
+
 
 # 保存（npy形式）
 np.save("distance_L1.npy", dist_L1)

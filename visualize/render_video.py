@@ -31,7 +31,7 @@ def create_video_pil(log_path, map_path, video_path, fps=10):
     print(f"Saved video to: {video_path}")
 
 if __name__ == "__main__":
-    run_number = 2  # ← ここだけ数字変える！
+    run_number = 1  # ← ここだけ数字変える！
 
     run_dir = f"output/logs/run{run_number}"
     log_path = os.path.join(run_dir, "positions.npy")
