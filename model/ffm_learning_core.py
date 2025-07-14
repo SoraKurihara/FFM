@@ -19,6 +19,7 @@ class FloorFieldModel:
         self.N = N
         self.positions = self.initialize_agents()
         self.neighbors = self.get_neighbors()
+        self.prev_direction = np.zeros((self.N, 2), dtype=int)  # 前回の移動方向
 
         # 学習用
         self.Q = {}
@@ -41,6 +42,7 @@ class FloorFieldModel:
     def reset(self):
         self.positions = self.initialize_agents()
         self.dff = np.zeros_like(self.dff)
+        self.prev_direction = np.zeros((self.N, 2), dtype=int)
 
     def step(self, beta):
         move_requests = {}
@@ -68,14 +70,22 @@ class FloorFieldModel:
             if neighbor_coords.shape[0] > 0:
                 neighbor_coords = np.vstack([neighbor_coords, current_pos])
 
+                # 周辺密度を計算
+                local_density = np.sum(
+                    (self.positions[:,0] >= x-1) & (self.positions[:,0] <= x+1) &
+                    (self.positions[:,1] >= y-1) & (self.positions[:,1] <= y+1)
+                )
+
+                # 状態を作成
+                state = (
+                    tuple(map(tuple, (neighbor_coords - self.positions[idx]))),
+                    local_density,
+                    tuple(self.prev_direction[idx])
+                )
+
                 exit_mask = self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3
                 if np.any(exit_mask):
                     chosen_coord = neighbor_coords[exit_mask][0]
-
-                    # 出口の場合も適当なQ更新用のダミーを登録
-                    state = tuple(map(tuple, (neighbor_coords - self.positions[idx])))
-                    if state not in self.Q:
-                        self.Q[state] = np.zeros(len(neighbor_coords))
 
                     chosen_idx = np.where(exit_mask)[0][0]  # 最初の出口のインデックス
                     decisions[idx] = (chosen_idx, state, neighbor_coords)
@@ -85,8 +95,6 @@ class FloorFieldModel:
                     move_requests[tuple(chosen_coord)].append(idx)
                     continue
 
-                # 状態をtupleに変換
-                state = tuple(map(tuple, (neighbor_coords - self.positions[idx])))
                 if state not in self.Q:
                     self.Q[state] = np.zeros(len(neighbor_coords))
 
@@ -123,13 +131,14 @@ class FloorFieldModel:
 
                 reward = beta * (prev_sff - next_sff)
                 if self.map_array[target[0], target[1]] == 3:
-                    reward += 10
+                    continue
 
                 next_state = state
                 self.Q[state][chosen_idx] += self.alpha * (
                     reward + self.gamma * np.max(self.Q.get(next_state, np.zeros_like(self.Q[state])))
                     - self.Q[state][chosen_idx]
                 )
+                self.prev_direction[idx] = target - self.positions[idx]
                 self.dff[self.positions[idx][0], self.positions[idx][1]] += 1
 
             else:
@@ -144,13 +153,14 @@ class FloorFieldModel:
 
                     reward = beta * (prev_sff - next_sff)
                     if self.map_array[target[0], target[1]] == 3:
-                        reward += 10
+                        continue
 
                     next_state = state
                     self.Q[state][chosen_idx] += self.alpha * (
                         reward + self.gamma * np.max(self.Q.get(next_state, np.zeros_like(self.Q[state])))
                         - self.Q[state][chosen_idx]
                     )
+                    self.prev_direction[idx] = target - self.positions[idx]
                     self.dff[self.positions[idx][0], self.positions[idx][1]] += 1
 
                 # 衝突ペナルティ
@@ -164,6 +174,7 @@ class FloorFieldModel:
 
         keep_mask = self.map_array[next_positions[:, 0], next_positions[:, 1]] != 3
         self.positions = next_positions[keep_mask]
+        self.prev_direction = self.prev_direction[keep_mask]
         self.update_dff()
 
     def update_dff(self):

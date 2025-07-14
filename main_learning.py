@@ -12,13 +12,15 @@ def get_learning_dir(learning_id="Qlearning1", base_dir="output/logs"):
     os.makedirs(learning_dir, exist_ok=True)
     return learning_dir
 
+
 def compute_beta(episode_step):
-    if episode_step <= 500:
+    if episode_step <= 50:
         return 1.0
-    elif episode_step <= 1500:
-        return 1.0 - (episode_step - 500) / 1000.0
+    elif episode_step <= 150:
+        return 1.0 - (episode_step - 50) / 100.0
     else:
         return 0.0
+
 
 def main():
     learning_id = "Qlearning1"  # ← ここを変えるだけでディレクトリ管理
@@ -47,7 +49,7 @@ def main():
     model.alpha = 0.1
     model.gamma = 0.9
 
-    num_episodes = 10
+    num_episodes = 200
 
     for episode in range(num_episodes):
         model.reset()
@@ -74,6 +76,7 @@ def main():
 
     print(f"\nTraining finished after {num_episodes} episodes.")
     print(f"Results saved in directory: {learning_dir}")
+
 
 if __name__ == "__main__":
     main()
