@@ -1,3 +1,4 @@
+import pickle
 import random
 
 import numpy as np
@@ -19,12 +20,14 @@ class FloorFieldModel:
         self.N = N
         self.positions = self.initialize_agents()
         self.neighbors = self.get_neighbors()
-        self.prev_direction = np.zeros((self.N, 2), dtype=int)  # 前回の移動方向
+        self.prev_direction = np.zeros((self.N, 2), dtype=int)
 
-        # 学習用
+        # 学習
         self.Q = {}
         self.alpha = 0.1
         self.gamma = 0.9
+        self.paths = [[] for _ in range(self.N)]
+        self.action_size = len(self.neighbors) + 1  # 停止も含む
 
     def initialize_agents(self):
         free_cells = np.argwhere(self.map_array == 0)
@@ -43,21 +46,47 @@ class FloorFieldModel:
         self.positions = self.initialize_agents()
         self.dff = np.zeros_like(self.dff)
         self.prev_direction = np.zeros((self.N, 2), dtype=int)
+        self.paths = [[] for _ in range(self.N)]
+
+    def get_block_index(self, x, y, block_size=5):
+        return (x // block_size, y // block_size)
+
+    def extract_state(self, x, y, idx):
+        H, W = self.map_array.shape
+        xmin, xmax = max(0, x-1), min(H, x+2)
+        ymin, ymax = max(0, y-1), min(W, y+2)
+
+        local_map = np.zeros((3,3), dtype=int)
+        local_map[(xmin-x+1):(xmax-x+1), (ymin-y+1):(ymax-y+1)] = self.map_array[xmin:xmax, ymin:ymax]
+
+        local_occupancy = np.zeros((3,3), dtype=int)
+        for px, py in self.positions:
+            if (xmin <= px < xmax) and (ymin <= py < ymax):
+                local_occupancy[(px-x+1), (py-y+1)] = 1
+        local_occupancy[1,1] = 0
+
+        block_index = self.get_block_index(x, y)
+
+        return (
+            tuple(local_map.flatten()),
+            tuple(local_occupancy.flatten()),
+            tuple(self.prev_direction[idx]),
+            block_index
+        )
 
     def step(self, beta):
         move_requests = {}
         next_positions = np.copy(self.positions)
-
         occupied = self.positions.view([('', self.positions.dtype)] * 2).reshape(-1)
         decisions = {}
+        arrived_indices = []
 
         for idx in range(self.positions.shape[0]):
             x, y = self.positions[idx]
-            current_pos = np.array([x, y])
+            state = self.extract_state(x, y, idx)
 
             offsets = np.array(self.neighbors)
             neighbor_coords = self.positions[idx] + offsets
-
             mask = (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 0) | \
                    (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3)
             neighbor_coords = neighbor_coords[mask]
@@ -66,126 +95,99 @@ class FloorFieldModel:
             mask = ~np.isin(neighbor_struct, occupied)
             neighbor_coords = neighbor_coords[mask]
 
-            # 動かない選択肢を追加
-            if neighbor_coords.shape[0] > 0:
-                neighbor_coords = np.vstack([neighbor_coords, current_pos])
+            current_pos = np.array([x, y])
+            neighbor_coords = np.vstack([neighbor_coords, current_pos])  # 停止含む
 
-                # 周辺密度を計算
-                local_density = np.sum(
-                    (self.positions[:,0] >= x-1) & (self.positions[:,0] <= x+1) &
-                    (self.positions[:,1] >= y-1) & (self.positions[:,1] <= y+1)
-                )
+            if state not in self.Q:
+                self.Q[state] = np.zeros(self.action_size)
 
-                # 状態を作成
-                state = (
-                    tuple(map(tuple, (neighbor_coords - self.positions[idx]))),
-                    local_density,
-                    tuple(self.prev_direction[idx])
-                )
+            action_to_index = {tuple(current_pos + np.array(offset)): i for i, offset in enumerate(self.neighbors)}
+            action_to_index[tuple(current_pos)] = self.action_size - 1
 
-                exit_mask = self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3
-                if np.any(exit_mask):
-                    chosen_coord = neighbor_coords[exit_mask][0]
+            exit_mask = self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3
+            if np.any(exit_mask):
+                chosen_idx = np.where(exit_mask)[0][0]
+                chosen_coord = tuple(neighbor_coords[chosen_idx])
+                action = action_to_index.get(tuple(neighbor_coords[chosen_idx]), self.action_size - 1)
+                self.paths[idx].append((state, action, 0))
+                decisions[idx] = (chosen_coord, idx)
+                move_requests.setdefault(chosen_coord, []).append(idx)
+                continue
 
-                    chosen_idx = np.where(exit_mask)[0][0]  # 最初の出口のインデックス
-                    decisions[idx] = (chosen_idx, state, neighbor_coords)
+            sff_vals = self.sff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
+            dff_vals = self.dff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
+            q_vals = np.array([self.Q[state][action_to_index.get(tuple(pos), self.action_size - 1)]
+                               for pos in neighbor_coords])
 
-                    if tuple(chosen_coord) not in move_requests:
-                        move_requests[tuple(chosen_coord)] = []
-                    move_requests[tuple(chosen_coord)].append(idx)
-                    continue
+            val = beta * (-self.params["k_S"] * sff_vals + self.params["k_D"] * dff_vals) + (1 - beta) * q_vals
+            score_max = np.max(val)
+            probs = np.exp(val - score_max)
+            probs_sum = probs.sum()
+            if probs_sum == 0 or not np.isfinite(probs_sum):
+                continue
+            probs /= probs_sum
 
-                if state not in self.Q:
-                    self.Q[state] = np.zeros(len(neighbor_coords))
+            chosen_idx = np.random.choice(len(neighbor_coords), p=probs)
+            chosen_coord = tuple(neighbor_coords[chosen_idx])
+            action = action_to_index.get(chosen_coord, self.action_size - 1)
 
-                sff_vals = self.sff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-                dff_vals = self.dff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-                q_vals = self.Q[state]
+            reward = -0.1 if np.array_equal(neighbor_coords[chosen_idx], current_pos) else 0.0
+            self.paths[idx].append((state, action, reward))
+            decisions[idx] = (chosen_coord, idx)
+            move_requests.setdefault(chosen_coord, []).append(idx)
 
-                val = beta * (-self.params["k_S"] * sff_vals + self.params["k_D"] * dff_vals) + (1 - beta) * q_vals
-                score_max = np.max(val)
-                probs = np.exp(val - score_max)
-                probs_sum = probs.sum()
-                if probs_sum == 0 or not np.isfinite(probs_sum):
-                    continue
-                probs /= probs_sum
-
-                chosen_idx = np.random.choice(len(neighbor_coords), p=probs)
-                chosen = tuple(neighbor_coords[chosen_idx])
-
-                if chosen not in move_requests:
-                    move_requests[chosen] = []
-                move_requests[chosen].append(idx)
-
-                decisions[idx] = (chosen_idx, state, neighbor_coords)
-
-        # 衝突解決 + Q更新
         for target, agents in move_requests.items():
             if len(agents) == 1:
                 idx = agents[0]
-                chosen_idx, state, neighbor_coords = decisions[idx]
-
-                prev_sff = self.sff[self.positions[idx][0], self.positions[idx][1]]
                 next_positions[idx] = target
-                next_sff = self.sff[target[0], target[1]]
-
-                reward = beta * (prev_sff - next_sff)
-                if self.map_array[target[0], target[1]] == 3:
-                    continue
-
-                next_state = state
-                self.Q[state][chosen_idx] += self.alpha * (
-                    reward + self.gamma * np.max(self.Q.get(next_state, np.zeros_like(self.Q[state])))
-                    - self.Q[state][chosen_idx]
-                )
                 self.prev_direction[idx] = target - self.positions[idx]
                 self.dff[self.positions[idx][0], self.positions[idx][1]] += 1
-
+                if self.map_array[target[0], target[1]] == 3:
+                    arrived_indices.append(idx)
             else:
+                for idx in agents:
+                    if self.paths[idx]:
+                        state, action, _ = self.paths[idx][-1]
+                        self.paths[idx][-1] = (state, action, -1)
                 if np.random.rand() < 0.5:
                     chosen = random.choice(agents)
-                    idx = chosen
-                    chosen_idx, state, neighbor_coords = decisions[idx]
-
-                    prev_sff = self.sff[self.positions[idx][0], self.positions[idx][1]]
-                    next_positions[idx] = target
-                    next_sff = self.sff[target[0], target[1]]
-
-                    reward = beta * (prev_sff - next_sff)
+                    next_positions[chosen] = target
+                    self.prev_direction[chosen] = target - self.positions[chosen]
+                    self.dff[self.positions[chosen][0], self.positions[chosen][1]] += 1
                     if self.map_array[target[0], target[1]] == 3:
-                        continue
+                        arrived_indices.append(chosen)
 
-                    next_state = state
-                    self.Q[state][chosen_idx] += self.alpha * (
-                        reward + self.gamma * np.max(self.Q.get(next_state, np.zeros_like(self.Q[state])))
-                        - self.Q[state][chosen_idx]
-                    )
-                    self.prev_direction[idx] = target - self.positions[idx]
-                    self.dff[self.positions[idx][0], self.positions[idx][1]] += 1
+        self.positions = next_positions
 
-                # 衝突ペナルティ
-                for idx in agents:
-                    chosen_idx, state, neighbor_coords = decisions[idx]
-                    next_state = state
-                    self.Q[state][chosen_idx] += self.alpha * (
-                        -1 + self.gamma * np.max(self.Q.get(next_state, np.zeros_like(self.Q[state])))
-                        - self.Q[state][chosen_idx]
-                    )
+        for idx in sorted(arrived_indices, reverse=True):
+            path = self.paths[idx]
+            if path:
+                state, action, _ = path[-1]
+                path[-1] = (state, action, 10)
 
-        keep_mask = self.map_array[next_positions[:, 0], next_positions[:, 1]] != 3
-        self.positions = next_positions[keep_mask]
-        self.prev_direction = self.prev_direction[keep_mask]
+            G = 0
+            for state, action, reward in reversed(path):
+                G = reward + self.gamma * G
+                if state not in self.Q:
+                    self.Q[state] = np.zeros(self.action_size)
+                self.Q[state][action] += self.alpha * (G - self.Q[state][action])
+
+            self.positions = np.delete(self.positions, idx, axis=0)
+            self.prev_direction = np.delete(self.prev_direction, idx, axis=0)
+            del self.paths[idx]
+
         self.update_dff()
 
     def update_dff(self):
         diffuse = self.params["diffuse"]
         decay = self.params["decay"]
         new_dff = (1 - decay) * (1 - diffuse) * self.dff
-
         padded = np.pad(new_dff, 1, mode='constant')
         for dx, dy in self.neighbors:
             new_dff += decay * (1 - diffuse) / len(self.neighbors) * padded[1+dx:new_dff.shape[0]+1+dx, 1+dy:new_dff.shape[1]+1+dy]
-
         self.dff = new_dff
-        threshold = 1e-4
-        self.dff[self.dff < threshold] = 0
+        self.dff[self.dff < 1e-4] = 0
+
+    def save_Q(self, filepath):
+        with open(filepath, "wb") as f:
+            pickle.dump(self.Q, f)
