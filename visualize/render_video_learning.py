@@ -31,8 +31,8 @@ def create_video_pil(log_path, map_path, video_path, fps=10):
     print(f"Saved video to: {video_path}")
 
 if __name__ == "__main__":
-    learning_id = "Qlearning1"  # ← ディレクトリ名
-    episode_list = [0, 100, 150, 175, 199]     # ← ここで好きなエピソード番号を複数指定
+    learning_id = "Qlearning2"  # ← ディレクトリ名
+    episode_list = [0, 50, 100, 148]     # ← ここで好きなエピソード番号を複数指定
 
     learning_dir = os.path.join("output", "logs", learning_id)
     config_path = os.path.join(learning_dir, "run_config_used.yaml")
