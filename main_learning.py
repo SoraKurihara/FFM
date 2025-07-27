@@ -14,16 +14,16 @@ def get_learning_dir(learning_id="Qlearning1", base_dir="output/logs"):
 
 
 def compute_beta(episode_step):
-    if episode_step <= 50:
+    if episode_step <= 500:
         return 1.0
-    elif episode_step <= 150:
-        return 1.0 - (episode_step - 50) / 100.0
+    elif episode_step <= 1500:
+        return 1.0 - (episode_step - 500) / 1000.0
     else:
         return 0.0
 
 
 def main():
-    learning_id = "Qlearning1"  # ← ここを変えるだけでディレクトリ管理
+    learning_id = "Qlearning3"  # ← ここを変えるだけでディレクトリ管理
     learning_dir = get_learning_dir(learning_id)
     save_config = os.path.join(learning_dir, "run_config_used.yaml")
 
@@ -49,7 +49,7 @@ def main():
     model.alpha = 0.1
     model.gamma = 0.9
 
-    num_episodes = 200
+    num_episodes = 2000
 
     for episode in range(num_episodes):
         model.reset()
@@ -57,7 +57,7 @@ def main():
         episode_log = []
 
         while model.positions.shape[0] > 0:
-            beta = compute_beta(step)
+            beta = compute_beta(episode)
             model.step(beta)
             episode_log.append(np.copy(model.positions))
             step += 1
@@ -76,6 +76,8 @@ def main():
 
     print(f"\nTraining finished after {num_episodes} episodes.")
     print(f"Results saved in directory: {learning_dir}")
+    
+    model.save_Q(f"output/logs/{learning_id}/Q.pkl")
 
 
 if __name__ == "__main__":
