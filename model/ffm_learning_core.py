@@ -48,7 +48,7 @@ class FloorFieldModel:
         self.prev_direction = np.zeros((self.N, 2), dtype=int)
         self.paths = [[] for _ in range(self.N)]
 
-    def get_block_index(self, x, y, block_size=5):
+    def get_block_index(self, x, y, block_size=3):
         return (x // block_size, y // block_size)
 
     def extract_state(self, x, y, idx):
@@ -70,7 +70,6 @@ class FloorFieldModel:
         return (
             tuple(local_map.flatten()),
             tuple(local_occupancy.flatten()),
-            tuple(self.prev_direction[idx]),
             block_index
         )
 
