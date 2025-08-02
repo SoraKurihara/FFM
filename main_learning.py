@@ -14,16 +14,16 @@ def get_learning_dir(learning_id="Qlearning1", base_dir="output/logs"):
 
 
 def compute_beta(episode_step):
-    if episode_step <= 500:
+    if episode_step <= 50:
         return 1.0
-    elif episode_step <= 1500:
-        return 1.0 - (episode_step - 500) / 1000.0
+    elif episode_step <= 150:
+        return 1.0 - (episode_step - 50) / 100.0
     else:
         return 0.0
 
 
 def main():
-    learning_id = "Qlearning3"  # ← ここを変えるだけでディレクトリ管理
+    learning_id = "Qlearning5"  # ← ここを変えるだけでディレクトリ管理
     learning_dir = get_learning_dir(learning_id)
     save_config = os.path.join(learning_dir, "run_config_used.yaml")
 
@@ -49,7 +49,7 @@ def main():
     model.alpha = 0.1
     model.gamma = 0.9
 
-    num_episodes = 2000
+    num_episodes = 150
 
     for episode in range(num_episodes):
         model.reset()

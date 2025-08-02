@@ -1,6 +1,6 @@
 map: data/maps/simple_room.npy
 sff: data/sff/distance_L1.npy
-N: 10
+N: 100
 
 params:
   k_S: 3
