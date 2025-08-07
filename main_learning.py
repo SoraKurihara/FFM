@@ -23,7 +23,7 @@ def compute_beta(episode_step):
 
 
 def main():
-    learning_id = "Qlearning5"  # ← ここを変えるだけでディレクトリ管理
+    learning_id = "Qlearning6"
     learning_dir = get_learning_dir(learning_id)
     save_config = os.path.join(learning_dir, "run_config_used.yaml")
 
@@ -40,24 +40,40 @@ def main():
     # データ読み込み
     map_array = np.load(config["map"])
     sff_path = config["sff"]
-    N = config["N"]
+    full_N = config["N"]
     params = config["params"]
 
-    # モデル初期化
-    model = FloorFieldModel(map_array, sff_path, N, params)
-    model.Q = {}     # Qテーブル
-    model.alpha = 0.1
-    model.gamma = 0.9
+    num_episodes = 650
+    model = None  # 最初はまだ生成しない（Nが変わるから）
+    
+    shared_Q = {}  # ← これを一番最初に用意！
 
-    num_episodes = 150
 
     for episode in range(num_episodes):
+        # 最初の500エピソードは割合を変える
+        if episode < 500:
+            ratio = (episode // 50 + 1)
+            N = full_N * ratio // 10
+            beta = 1.0
+        else:
+            N = full_N
+            beta = compute_beta(episode - 500)
+
+        model = FloorFieldModel(map_array, sff_path, N, params)
+        model.alpha = 0.1
+        model.gamma = 0.9
+        model.Q = shared_Q  # ← ここで共有する！！
+
+        if episode == 0:
+            print(f"👣 Initial training with varying N for first 500 episodes.")
+        elif episode == 500:
+            print(f"📉 Now transitioning to mixed β Q-learning (beta < 1.0)")
+
         model.reset()
         step = 0
         episode_log = []
 
         while model.positions.shape[0] > 0:
-            beta = compute_beta(episode)
             model.step(beta)
             episode_log.append(np.copy(model.positions))
             step += 1
@@ -65,19 +81,19 @@ def main():
             if step % 100 == 0:
                 print(f"[Episode {episode}] Step {step}, Remaining: {model.positions.shape[0]}, beta={beta:.3f}")
 
-        # 各エピソードごとに保存
+        # 保存
         np.save(os.path.join(learning_dir, f"episode_{episode}.npy"),
                 np.array(episode_log, dtype=object))
         print(f"Episode {episode} finished in {step} steps and saved.")
 
-    # 設定ファイルを保存
+    # 設定保存
     with open(save_config, "w") as f:
         yaml.safe_dump(config, f)
 
-    print(f"\nTraining finished after {num_episodes} episodes.")
-    print(f"Results saved in directory: {learning_dir}")
-    
     model.save_Q(f"output/logs/{learning_id}/Q.pkl")
+    print(f"\n✅ Training finished after {num_episodes} episodes.")
+    print(f"📂 Results saved in directory: {learning_dir}")
+
 
 
 if __name__ == "__main__":

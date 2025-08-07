@@ -53,23 +53,31 @@ class FloorFieldModel:
 
     def extract_state(self, x, y, idx):
         H, W = self.map_array.shape
-        xmin, xmax = max(0, x-1), min(H, x+2)
-        ymin, ymax = max(0, y-1), min(W, y+2)
+        local_map = np.zeros((5, 5), dtype=int)  # デフォルトは 0（何もない）
+        local_occupancy = np.zeros((5, 5), dtype=int)
 
-        local_map = np.zeros((3,3), dtype=int)
-        local_map[(xmin-x+1):(xmax-x+1), (ymin-y+1):(ymax-y+1)] = self.map_array[xmin:xmax, ymin:ymax]
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                xi = x + dx
+                yi = y + dy
+                if 0 <= xi < H and 0 <= yi < W:
+                    local_map[dx + 2, dy + 2] = self.map_array[xi, yi]
 
-        local_occupancy = np.zeros((3,3), dtype=int)
         for px, py in self.positions:
-            if (xmin <= px < xmax) and (ymin <= py < ymax):
-                local_occupancy[(px-x+1), (py-y+1)] = 1
-        local_occupancy[1,1] = 0
+            dx = px - x
+            dy = py - y
+            if -2 <= dx <= 2 and -2 <= dy <= 2:
+                local_occupancy[dx + 2, dy + 2] = 1
+
+        local_occupancy[2, 2] = 0  # 自分は除外
+
+        # map + occupancy を結合
+        combined = (local_map + (local_occupancy)).flatten()
 
         block_index = self.get_block_index(x, y)
 
         return (
-            tuple(local_map.flatten()),
-            tuple(local_occupancy.flatten()),
+            tuple(combined),
             block_index
         )
 
