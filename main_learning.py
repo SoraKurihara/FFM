@@ -7,13 +7,31 @@ import yaml
 from model.ffm_learning_core import FloorFieldModel
 
 
-def get_learning_dir(learning_id="Qlearning1", base_dir="output/logs"):
+# -----------------------------
+# Utilities
+# -----------------------------
+def get_learning_dir(learning_id: str = "Qlearning1", base_dir: str = "output/logs") -> str:
+    """Create and return a directory for this learning run."""
     learning_dir = os.path.join(base_dir, learning_id)
     os.makedirs(learning_dir, exist_ok=True)
     return learning_dir
 
 
-def compute_beta(episode_step):
+def seed_everything(seed: int | None) -> None:
+    """Fix random seeds (numpy & random)."""
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+
+
+def compute_beta(episode_step: int) -> float:
+    """
+    External beta schedule:
+      - step <= 50     -> 1.0
+      - 50 < step <=150 -> linearly decreases to 0.0
+      - step > 150     -> 0.0
+    NOTE: This function expects 'episode_step' to be the offset after the warm-up.
+    """
     if episode_step <= 50:
         return 1.0
     elif episode_step <= 150:
@@ -22,78 +40,131 @@ def compute_beta(episode_step):
         return 0.0
 
 
-def main():
-    learning_id = "Qlearning6"
-    learning_dir = get_learning_dir(learning_id)
-    save_config = os.path.join(learning_dir, "run_config_used.yaml")
+def compute_agent_count(episode: int, full_N: int) -> int:
+    """
+    First 500 episodes: ramp N by 10% every 50 episodes.
+    After 500 episodes: use full_N.
+    """
+    if episode < 500:
+        ratio = (episode // 50 + 1)  # 1,2,...,10
+        return max(1, full_N * ratio // 10)
+    return full_N
 
-    # 設定読み込み
+
+def run_episode(
+    map_array: np.ndarray,
+    sff_path: str,
+    params: dict,
+    N: int,
+    beta: float,
+    shared_Q: dict,
+    alpha: float = 0.1,
+    gamma: float = 0.9,
+    log_interval: int = 100,
+):
+    """
+    Run a single episode and return (episode_log, steps).
+    - Uses shared_Q across episodes to accumulate learning.
+    - Respects beta schedule passed from the caller.
+    """
+    model = FloorFieldModel(map_array, sff_path, N, params)
+    model.alpha = alpha
+    model.gamma = gamma
+    model.Q = shared_Q  # share Q across episodes
+
+    model.reset()
+    step = 0
+    episode_log = []
+
+    while model.positions.shape[0] > 0:
+        model.step(beta)
+        episode_log.append(np.copy(model.positions))
+        step += 1
+
+        if log_interval and (step % log_interval == 0):
+            print(f"[beta={beta:.3f}] step={step}, remaining={model.positions.shape[0]}")
+
+    return np.array(episode_log, dtype=object), step, model.Q
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    learning_id = "Qlearning7"
+    learning_dir = get_learning_dir(learning_id)
+    save_config_path = os.path.join(learning_dir, "run_config_used.yaml")
+
+    # Load config
     with open("config/default_config.yaml", "r") as f:
         config = yaml.safe_load(f)
 
-    # シード固定
+    # Seeds
     seed = config.get("seed", None)
-    if seed is not None:
-        np.random.seed(seed)
-        random.seed(seed)
+    seed_everything(seed)
 
-    # データ読み込み
+    # Data & params
     map_array = np.load(config["map"])
     sff_path = config["sff"]
-    full_N = config["N"]
-    params = config["params"]
+    full_N = int(config["N"])
+    params = dict(config.get("params", {}))  # ensure dict
 
+    # Training schedule
     num_episodes = 650
-    model = None  # 最初はまだ生成しない（Nが変わるから）
-    
-    shared_Q = {}  # ← これを一番最初に用意！
+    shared_Q = {}  # shared across episodes
 
+    print("👣 Warm-up: varying N for first 500 episodes (beta=1.0).")
+    print("📉 After episode 500: start hybrid schedule where beta decreases to 0.0.\n")
 
     for episode in range(num_episodes):
-        # 最初の500エピソードは割合を変える
+        # Determine N and beta
+        N = compute_agent_count(episode, full_N)
         if episode < 500:
-            ratio = (episode // 50 + 1)
-            N = full_N * ratio // 10
             beta = 1.0
         else:
-            N = full_N
             beta = compute_beta(episode - 500)
 
-        model = FloorFieldModel(map_array, sff_path, N, params)
-        model.alpha = 0.1
-        model.gamma = 0.9
-        model.Q = shared_Q  # ← ここで共有する！！
+        # Run one episode
+        episode_log, steps, shared_Q = run_episode(
+            map_array=map_array,
+            sff_path=sff_path,
+            params=params,
+            N=N,
+            beta=beta,
+            shared_Q=shared_Q,
+            alpha=0.1,
+            gamma=0.9,
+            log_interval=100,
+        )
 
-        if episode == 0:
-            print(f"👣 Initial training with varying N for first 500 episodes.")
-        elif episode == 500:
-            print(f"📉 Now transitioning to mixed β Q-learning (beta < 1.0)")
+        # Save episode log
+        np.save(os.path.join(learning_dir, f"episode_{episode}.npy"), episode_log)
+        print(f"✅ Episode {episode} finished in {steps} steps. Saved to {learning_dir}.")
 
-        model.reset()
-        step = 0
-        episode_log = []
+        # Optional periodic Q save (safety checkpoint)
+        if (episode + 1) % 50 == 0:
+            # Use model-like save name
+            q_path = os.path.join(learning_dir, f"Q_ep{episode+1}.pkl")
+            try:
+                import pickle
+                with open(q_path, "wb") as f:
+                    pickle.dump(shared_Q, f)
+                print(f"💾 Q checkpoint saved: {q_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to save Q checkpoint at episode {episode+1}: {e}")
 
-        while model.positions.shape[0] > 0:
-            model.step(beta)
-            episode_log.append(np.copy(model.positions))
-            step += 1
-
-            if step % 100 == 0:
-                print(f"[Episode {episode}] Step {step}, Remaining: {model.positions.shape[0]}, beta={beta:.3f}")
-
-        # 保存
-        np.save(os.path.join(learning_dir, f"episode_{episode}.npy"),
-                np.array(episode_log, dtype=object))
-        print(f"Episode {episode} finished in {step} steps and saved.")
-
-    # 設定保存
-    with open(save_config, "w") as f:
+    # Save the config actually used
+    with open(save_config_path, "w") as f:
         yaml.safe_dump(config, f)
 
-    model.save_Q(f"output/logs/{learning_id}/Q.pkl")
-    print(f"\n✅ Training finished after {num_episodes} episodes.")
-    print(f"📂 Results saved in directory: {learning_dir}")
+    # Final Q save via a temp model helper (reusing class method)
+    # Instantiate a tiny model to call save_Q with shared dict.
+    dummy = FloorFieldModel(map_array, sff_path, 1, params)
+    dummy.Q = shared_Q
+    dummy.save_Q(os.path.join(learning_dir, "Q.pkl"))
 
+    print(f"\n🎉 Training finished after {num_episodes} episodes.")
+    print(f"📂 Results saved in: {learning_dir}")
 
 
 if __name__ == "__main__":
