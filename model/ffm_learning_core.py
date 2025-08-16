@@ -8,13 +8,12 @@ import numpy as np
 
 class FloorFieldModel:
     """
-    Refactored core:
-      - Always softmax selection on pre-softmax mix: val = beta*FFM + (1-beta)*Q
-      - SFF/DFF kept; DFF evolves each step
-      - MC (reverse) update at exit/timeout
-      - Collision penalty only to agents who failed to move
-      - Fast state encoding: bytes (5x5 local map + 5x5 occupancy, uint8) + packed block index
-      - 5x5 extraction via padding (no nested loops)
+    - Selection: softmax over pre-softmax mix val = beta*FFM + (1-beta)*k_Q*Q
+    - SFF/DFF kept; DFF evolves each step
+    - MC (reverse) update at exit/timeout
+    - Collision penalty only to agents who failed to move
+    - Fast state encoding: bytes (3x3 local map + 3x3 occupancy, uint8) + packed block index
+    - 3x3 extraction via padding (no nested loops)
     """
 
     def __init__(
@@ -23,8 +22,9 @@ class FloorFieldModel:
         sff_path: str,
         N: int,
         params: Dict = None,
-        state_encoding: str = "bytes",   # "bytes" (fast, default) or "tuple" (compat)
+        state_encoding: str = "bytes",   # "bytes" (fast, default) or "tuple"
         block_size: int = 3,
+        state_radius: int = 1,           # ← 3x3 (=2*1+1)
     ):
         # ---------------- Params ----------------
         default_params = {
@@ -32,7 +32,7 @@ class FloorFieldModel:
             "k_D": 1.0,
             "diffuse": 0.2,
             "decay": 0.2,
-            "neighborhood": "moore",
+            "neighborhood": "moore",      # 実行側のconfigで "neumann" に上書きされます
             # rewards & episode control
             "success_reward": 100.0,
             "timeout_penalty": -20.0,
@@ -42,25 +42,27 @@ class FloorFieldModel:
             "direction_keep_bonus": 0.05,
             "backtrack_penalty": 0.1,     # subtracted when applied
             "max_steps": 500,
+            # Q scaling
+            "k_Q": 1.0,                   # 先輩はここを 5 に設定
         }
         self.params = default_params if params is None else {**default_params, **params}
 
         # ---------------- Fields ----------------
         self.map_array = map_array.astype(np.uint8, copy=False)
-        # SFF kept (used in FFM term); dtype left as-is
-        self.sff = np.load(sff_path, mmap_mode="r")
+        self.sff = np.load(sff_path, mmap_mode="r")   # FFMに使用
         self.dff = np.zeros_like(self.map_array, dtype=np.float32)
 
         self.N = int(N)
         self.block_size = int(block_size)
         self.state_encoding = state_encoding
+        self.state_radius = int(state_radius)         # ← 3x3 用
+        self.win = 2 * self.state_radius + 1
 
         # neighbors & action mapping
         self.neighbors = self._get_neighbors(self.params["neighborhood"])
         self.neighbor_offsets = np.array(self.neighbors, dtype=np.int8)  # (K,2)
         self.action_size = len(self.neighbors) + 1  # + stop
         self.stop_action = self.action_size - 1
-        # delta -> action index
         self.delta_to_action = {tuple(delta): i for i, delta in enumerate(self.neighbors)}
         self.delta_to_action[(0, 0)] = self.stop_action
 
@@ -71,14 +73,14 @@ class FloorFieldModel:
         # RL
         self.Q: Dict[bytes, np.ndarray] = {}
         self.alpha = 0.1
-        self.gamma = 0.9
+        self.gamma = 0.99                 # ← デフォルトを 0.99 に
         self.paths: List[List[Tuple[bytes, int, float]]] = [[] for _ in range(self.N)]
 
         # episode
         self.step_count = 0
 
-        # static padded map for 5x5 slicing
-        self._map_padded = np.pad(self.map_array, 2, mode="constant")
+        # static padded map for 3x3 slicing
+        self._map_padded = np.pad(self.map_array, self.state_radius, mode="constant")
 
     # ---------------- Init helpers ----------------
     def _get_neighbors(self, neighborhood: str):
@@ -110,103 +112,73 @@ class FloorFieldModel:
     def _get_block_index(self, x: int, y: int) -> Tuple[int, int]:
         return (x // self.block_size, y // self.block_size)
 
-    def _encode_state_bytes(self, x: int, y: int, occupancy_padded: np.ndarray) -> bytes:
-        # 5x5 map patch (uint8)
-        mp = self._map_padded[x: x + 5, y: y + 5].astype(np.uint8, copy=False)
-        # 5x5 occupancy patch (bool -> uint8), center cleared
-        oc = occupancy_padded[x: x + 5, y: y + 5]
-        # combine map + occupancy (0/1)
-        combined = mp + oc.astype(np.uint8, copy=False)
-        # block index packed
-        bx, by = self._get_block_index(x, y)
-        return combined.tobytes() + struct.pack("HH", bx, by)
-
-    def _encode_state_tuple(self, x: int, y: int, occupancy_padded: np.ndarray):
-        mp = self._map_padded[x: x + 5, y: y + 5].astype(np.uint8, copy=False)
-        oc = occupancy_padded[x: x + 5, y: y + 5].astype(np.uint8, copy=False)
+    def _encode_state_tuple(self, x: int, y: int, occ_pad: np.ndarray):
+        r = self.state_radius
+        mp = self._map_padded[x: x + 2*r + 1, y: y + 2*r + 1].astype(np.uint8, copy=False)
+        oc = occ_pad[x: x + 2*r + 1, y: y + 2*r + 1].astype(np.uint8, copy=True)
+        oc[r, r] = 0  # 自分は除外
         combined = (mp + oc).reshape(-1)
         return (tuple(combined.tolist()), self._get_block_index(x, y))
-
-    def _extract_state(self, x: int, y: int, occupancy_padded: np.ndarray):
-        if self.state_encoding == "bytes":
-            return self._encode_state_bytes(x, y, occupancy_padded)
-        else:
-            return self._encode_state_tuple(x, y, occupancy_padded)
 
     # ---------------- Main step ----------------
     def step(self, beta: float):
         """
         beta is provided from the outer schedule.
-        Selection: softmax over pre-softmax mix val = beta*FFM + (1-beta)*Q
+        Selection: softmax over pre-softmax mix val = beta*FFM + (1-beta)*k_Q*Q
         """
         self.step_count += 1
-
         H, W = self.map_array.shape
+        r = self.state_radius
+        win = self.win
 
-        # occupancy grid (True where someone stands now)
+        # occupancy (True: occupied now)
         occupancy = np.zeros((H, W), dtype=bool)
         occupancy[self.positions[:, 0], self.positions[:, 1]] = True
-        occupancy_padded = np.pad(occupancy, 2, mode="constant")
-        # center is self; later we'll clear center in state encoding via slice-and-clear:
-        # we simply set oc[2,2]=0 by not setting self in 'occupancy' or zeroing after slice.
-        # Easier: after slicing, we'll overwrite center to 0. For bytes path we just don't include self:
-        # we can't easily clear per-agent here, so we'll clear after we pick oc slice:
-        # -> implement by temporarily clearing at state build time (see below).
-        # (Below method slices and uses oc as-is; we need to make sure center is 0:
-        #  we'll subtract center later when building oc; to keep it simple, handle by
-        #  making a copy of small 5x5 slice and clearing its center.)
+        occupancy_padded = np.pad(occupancy, r, mode="constant")
 
         move_requests: Dict[Tuple[int, int], List[int]] = {}
         next_positions = self.positions.copy()
         arrived_indices: List[int] = []
 
-        # quick views
         k_S = float(self.params["k_S"])
         k_D = float(self.params["k_D"])
+        k_Q = float(self.params.get("k_Q", 1.0))
 
         for idx in range(self.positions.shape[0]):
             x, y = int(self.positions[idx, 0]), int(self.positions[idx, 1])
 
-            # ---- build state (5x5 map + occupancy, center cleared) ----
-            # slice small oc patch and clear center
-            oc_patch = occupancy_padded[x: x + 5, y: y + 5].copy()
-            oc_patch[2, 2] = False
-
+            # ---- state (3x3 map + 3x3 occupancy, center=0) ----
+            mp = self._map_padded[x: x + win, y: y + win].astype(np.uint8, copy=False)
+            oc = occupancy_padded[x: x + win, y: y + win].astype(np.uint8, copy=True)
+            oc[r, r] = 0
+            combined = mp + oc
+            bx, by = self._get_block_index(x, y)
             if self.state_encoding == "bytes":
-                # faster path builds combined inside:
-                mp = self._map_padded[x: x + 5, y: y + 5].astype(np.uint8, copy=False)
-                combined = mp + oc_patch.astype(np.uint8, copy=False)
-                bx, by = self._get_block_index(x, y)
                 state = combined.tobytes() + struct.pack("HH", bx, by)
             else:
-                state = self._encode_state_tuple(x, y, np.pad(occupancy, 2, mode="constant"))
+                state = (tuple(combined.reshape(-1).tolist()), (bx, by))
 
             # init Q[state]
             if state not in self.Q:
                 self.Q[state] = np.zeros(self.action_size, dtype=np.float32)
 
-            # ---- gather candidate neighbors (legal & unoccupied), plus stop ----
-            # candidate absolute coordinates
+            # ---- candidates (legal per map; exclude currently occupied), + stop ----
             neighbor_coords = self.positions[idx] + self.neighbor_offsets  # (K,2)
-            # legal by map (free=0 or exit=3)
             legal = (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 0) | \
                     (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3)
             neighbor_coords = neighbor_coords[legal]
 
-            # exclude currently occupied cells
             if neighbor_coords.size > 0:
                 occ_mask = ~occupancy[neighbor_coords[:, 0], neighbor_coords[:, 1]]
                 neighbor_coords = neighbor_coords[occ_mask]
 
-            # always include "stay"
             current_pos = np.array([x, y], dtype=np.int32)
             if neighbor_coords.size == 0:
                 neighbor_coords = current_pos.reshape(1, 2)
             else:
                 neighbor_coords = np.vstack([neighbor_coords, current_pos])
 
-            # map candidate positions to action indices via delta
-            deltas = neighbor_coords - current_pos  # (M,2)
+            deltas = neighbor_coords - current_pos
             action_indices = np.fromiter(
                 (self.delta_to_action.get((int(dx), int(dy)), self.stop_action) for dx, dy in deltas),
                 dtype=np.int32, count=deltas.shape[0]
@@ -219,7 +191,6 @@ class FloorFieldModel:
                 chosen_coord = tuple(neighbor_coords[chosen_idx])
                 action = int(action_indices[chosen_idx])
 
-                # base reward this step
                 reward = float(self.params["step_penalty"])
                 if chosen_coord == (x, y):
                     reward += (self.params["stop_penalty"] - self.params["step_penalty"])
@@ -234,11 +205,11 @@ class FloorFieldModel:
             q_vals = self.Q[state][action_indices]
 
             ffm_vals = (-k_S * sff_vals + k_D * dff_vals).astype(np.float32, copy=False)
-            val = beta * ffm_vals + (1.0 - beta) * q_vals
+            val = beta * ffm_vals + (1.0 - beta) * (k_Q * q_vals)
 
             # softmax (stable)
             logits = val - np.max(val)
-            probs = np.exp(logits, dtype=np.float64)
+            probs = np.exp(logits.astype(np.float64))
             sum_probs = probs.sum()
             if sum_probs == 0.0 or not np.isfinite(sum_probs):
                 probs = np.ones_like(probs, dtype=np.float64) / probs.size
@@ -266,7 +237,6 @@ class FloorFieldModel:
 
                 move_vec = (np.array(target) - self.positions[idx]).astype(np.int8, copy=False)
                 if (move_vec != 0).any():
-                    # direction keep / backtrack
                     if np.array_equal(move_vec, self.prev_direction[idx]):
                         s, a, r = self.paths[idx][-1]
                         self.paths[idx][-1] = (s, a, r + self.params["direction_keep_bonus"])
@@ -275,7 +245,6 @@ class FloorFieldModel:
                         self.paths[idx][-1] = (s, a, r - self.params["backtrack_penalty"])
 
                 self.prev_direction[idx] = move_vec
-                # DFF: increment at previous cell if moved
                 if (move_vec != 0).any():
                     self.dff[prev_pos[0], prev_pos[1]] += 1.0
 
@@ -283,13 +252,11 @@ class FloorFieldModel:
                     arrived_indices.append(idx)
 
             else:
-                # collision group
-                # decide if one winner passes (50%); else none passes
+                # collision group: maybe one winner passes
                 allow_one = (np.random.rand() < 0.5)
                 winner = None
                 if allow_one:
                     winner = random.choice(agents)
-                    # move winner
                     prev_pos = tuple(self.positions[winner])
                     next_positions[winner] = target
                     move_vec = (np.array(target) - self.positions[winner]).astype(np.int8, copy=False)
@@ -309,7 +276,7 @@ class FloorFieldModel:
                     if self.map_array[target[0], target[1]] == 3:
                         arrived_indices.append(winner)
 
-                # losers get collision penalty
+                # losers only: collision penalty
                 for idx in agents:
                     if (winner is not None) and (idx == winner):
                         continue
@@ -331,7 +298,6 @@ class FloorFieldModel:
 
         # ---------------- timeout handling ----------------
         if self.step_count >= int(self.params["max_steps"]) and self.positions.size > 0:
-            # finalize remaining with timeout penalty
             for local_idx in reversed(range(self.positions.shape[0])):
                 path = self.paths[local_idx]
                 if path:
@@ -340,7 +306,6 @@ class FloorFieldModel:
                 self._mc_update_and_remove(local_idx)
             self.step_count = 0
 
-        # evolve DFF (same as before)
         self.update_dff()
 
     # ---------------- Learning update ----------------
@@ -353,7 +318,6 @@ class FloorFieldModel:
                 self.Q[state] = np.zeros(self.action_size, dtype=np.float32)
             self.Q[state][action] += self.alpha * (G - self.Q[state][action])
 
-        # remove agent (keep order by deleting in reverse externally)
         self.positions = np.delete(self.positions, idx, axis=0)
         self.prev_direction = np.delete(self.prev_direction, idx, axis=0)
         del self.paths[idx]

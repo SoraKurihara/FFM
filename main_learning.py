@@ -91,7 +91,7 @@ def run_episode(
 # Main
 # -----------------------------
 def main():
-    learning_id = "Qlearning7"
+    learning_id = "Qlearning8"
     learning_dir = get_learning_dir(learning_id)
     save_config_path = os.path.join(learning_dir, "run_config_used.yaml")
 
@@ -128,12 +128,12 @@ def main():
         episode_log, steps, shared_Q = run_episode(
             map_array=map_array,
             sff_path=sff_path,
-            params=params,
+            params=params,          # ここに { "k_Q": 5, "neighborhood": "neumann", ... } が入っていればそのまま反映
             N=N,
             beta=beta,
             shared_Q=shared_Q,
             alpha=0.1,
-            gamma=0.9,
+            gamma=0.99,             # ← ここを 0.99 に
             log_interval=100,
         )
 
