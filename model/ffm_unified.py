@@ -86,12 +86,26 @@ class FloorFieldModelUnified:
             with open(pretrained_v_path, "rb") as f:
                 pretrained_v_pickled = pickle.load(f)
             self.V = defaultdict(lambda: 0.0)
-            for k, v in pretrained_v_pickled.items():
-                real_key = pickle.loads(k)
-                clean_key = tuple(
-                    tuple(int(x) for x in sub_tuple) for sub_tuple in real_key
-                )
+            
+            # --- 修正箇所: 読み込み時にキーを正規化（Numpy型排除） ---
+            for k_bytes, v in pretrained_v_pickled.items():
+                # 保存されていたバイト列キーを復元
+                # 元の構造は ((r, r, r, r), (bx, by)) を想定
+                try:
+                    original_key_structure = pickle.loads(k_bytes)
+                except TypeError:
+                    # もし既にバイト列でない場合（古いバージョン等）のガード
+                    original_key_structure = k_bytes
+
+                # 中身を強制的に Python 標準の int に変換してタプル化
+                # original_key_structure[0] は ranks, [1] は block_idx
+                ranks_tuple = tuple(int(r) for r in original_key_structure[0])
+                block_idx_tuple = (int(original_key_structure[1][0]), int(original_key_structure[1][1]))
+                
+                # 新しいキーとして保存（バイト列ではなくタプルそのものをキーにする）
+                clean_key = (ranks_tuple, block_idx_tuple)
                 self.V[clean_key] = v
+                
             self.initial_v_size = len(self.V)
             print(f"✓ 事前学習済みCriticを読み込みました: {self.initial_v_size}状態")
         else:
@@ -185,7 +199,8 @@ class FloorFieldModelUnified:
             state_map: マップ値配列（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
 
         Returns:
-            bytes: 状態のハッシュ可能な表現
+            tuple: (ranks_tuple, block_idx_tuple) の形式でハッシュ可能なキー
+            ※ pickle.dumps は使用せず、純粋なタプルを返します
         """
         height, width = state_map.shape
         ranks = []
@@ -240,11 +255,18 @@ class FloorFieldModelUnified:
 
             ranks.append(rank)
 
+        # --- 修正箇所: Numpy型を排除し、純粋なタプルを生成 ---
+        
         # 粗い位置情報（ブロックインデックス）
-        block_idx = (x // self.block_size, y // self.block_size)
+        # x, y は Numpy 配列から来ているため、明示的に int() で変換
+        block_idx = (int(x // self.block_size), int(y // self.block_size))
 
-        # ハッシュ可能な形式に変換
-        return pickle.dumps((tuple(ranks), block_idx))
+        # ranks も int のタプルに変換
+        ranks_tuple = tuple(int(r) for r in ranks)
+
+        # pickle.dumps ではなく、この構造そのものをキーとして返します
+        # 構造: ((rank0, rank1, ...), (bx, by))
+        return (ranks_tuple, block_idx)
 
     def step(self):
         move_requests = {}
@@ -267,6 +289,7 @@ class FloorFieldModelUnified:
             x, y = self.positions[idx]
 
             # 現在の状態をエンコード
+            # ※修正により、state はバイト列ではなくタプルになります
             state = self._encode_state(x, y, state_map)
             states[idx] = state
 
@@ -376,6 +399,7 @@ class FloorFieldModelUnified:
                 )
 
                 # Actorのロジット計算: kA * H(s,a) + kD * DFF
+                # state はタプルになっているのでそのまま辞書キーとして使用可能
                 state_key = state
                 fixed_action_size = len(all_coords)
                 if (

@@ -2,9 +2,9 @@
 """
 統合Actor学習の実行プログラム（初期配置を半径で制御）
 - 事前学習済みCriticを読み込み、Actorのみを学習
-- 出口から半径10, 15, 20, ... と5マス単位で増やしていく
-- 各半径に対して、N=1, 10, 20, 30, ..., 100と人数を増やしていく
-- 人数増加が優先（半径10マス以内の1人～100人、半径15マス以内の1人～100人、...）
+- 出口から半径を徐々に広げ、人数を徐々に増やしていくカリキュラム学習
+- 【変更点】イプシロン（探索率）は各設定（半径×人数）の開始時にリセットし、
+  その設定のエピソードループ内で減衰させる。
 """
 
 import os
@@ -15,32 +15,39 @@ from datetime import datetime
 
 import numpy as np
 
-from model.ffm_unified import FloorFieldModelUnified
+# modelフォルダにある ffm_unified.py からクラスを読み込む想定
+# 同じ階層に置く場合は `from ffm_unified import ...` に変更してください
+try:
+    from model.ffm_unified import FloorFieldModelUnified
+except ImportError:
+    # 簡易的なフォールバック（同じディレクトリにある場合）
+    from ffm_unified import FloorFieldModelUnified
 
 # ==================== 設定パラメータ ====================
 # 事前学習済みCriticデータのパス
-#PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20251216_171705/V_integrated_total99000ep.pkl"
-#PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260114_230940/V_integrated_total70000ep.pkl"
-PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260115_094311/V_integrated_total70000ep.pkl"
+# ※実際のパスに合わせて書き換えてください
+# PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260115_094311/V_integrated_total70000ep.pkl"
+PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260117_101523/V_integrated_total70000ep.pkl"
 
 # 半径の設定
-RADIUS_START = 3  # 開始半径
-RADIUS_END = 15  # 終了半径
-RADIUS_STEP = 2  # 半径の刻み幅
+RADIUS_START = 3   # 開始半径
+RADIUS_END = 15    # 終了半径
+RADIUS_STEP = 2    # 半径の刻み幅
 
 # 人数の設定
-# 人数リストは [1, 10, 20, 30, ..., N_END] となる（1だけ特別、それ以外は10の倍数）
-N_START = 1  # 未使用（互換性のため残している）
-N_END = 90  # 終了人数（10の倍数）
-N_STEP = 10  # 人数の刻み幅（10の倍数）
+# 人数リストは [1, 10, 20, 30, ..., N_END] となる
+N_START = 1   # 未使用（互換性のため残している）
+N_END = 90    # 終了人数（10の倍数）
+N_STEP = 10   # 人数の刻み幅（10の倍数）
 
 # エピソード数
-EPISODES_PER_CONFIG = 1000  # 各設定（半径×人数）あたりのエピソード数
+EPISODES_PER_CONFIG = 100  # 各設定（半径×人数）あたりのエピソード数
 
 # 最大ステップ数
 MAX_STEPS = 300
 
-# ε-greedy探索率（線形減衰）
+# ε-greedy探索率（各設定内での減衰）
+# 設定が切り替わるたびに START に戻り、1000エピソードかけて END まで下がる
 EPSILON_START = 0.2
 EPSILON_END = 0.01
 
@@ -49,17 +56,17 @@ OUTPUT_DIR = "output/logs/unified_actor_training"
 
 # モデルパラメータ
 MODEL_PARAMS = {
-    "k_S": 10,  # SFF係数（Criticからの指示に使用）
-    "k_D": 1,  # DFF係数
+    "k_S": 10,  # SFF係数
+    "k_D": 1,   # DFF係数
     "k_A": 10,  # Actor係数
     "alpha_v": 0.01,  # Criticの学習率（新規状態のみ）
-    "alpha_h": 0.1,  # Actorの学習率
+    "alpha_h": 0.1,   # Actorの学習率
     "gamma": 0.99,
     "exit_reward": 100.0,
     "step_penalty": -1.0,
     "collision_penalty": -1.0,
     "neighborhood": "neumann",
-    "block_size": 5,  # 状態エンコーディングのブロックサイズ（粗い位置情報）
+    "block_size": 1,  # 状態エンコーディングのブロックサイズ
 }
 
 # マップとSFFのパス
@@ -121,7 +128,7 @@ def count_available_cells(map_array, exit_pos, radius):
 def run_training():
     """学習の実行"""
     print("=" * 80)
-    print("統合Actor学習の実行プログラム（初期配置を半径で制御）")
+    print("統合Actor学習の実行プログラム（カリキュラム学習・局所的ε減衰）")
     print("=" * 80)
 
     # 事前学習済みCriticの確認
@@ -160,18 +167,19 @@ def run_training():
 
     # 半径と人数のリストを生成
     radius_list = list(range(RADIUS_START, RADIUS_END + 1, RADIUS_STEP))
-    # 人数リスト: 1だけ特別で、それ以外は10の倍数（10, 20, 30, ...）
+    # 人数リスト: 1だけ特別で、それ以外は10の倍数
     n_list = [1] + list(range(10, N_END + 1, N_STEP))
+
+    # 実行予定の総エピソード数を概算（スキップ分があるので実際はこれより少ない）
+    estimated_total_episodes = len(radius_list) * len(n_list) * EPISODES_PER_CONFIG
 
     print("\n設定:")
     print(f"  半径パターン: {radius_list}")
     print(f"  人数パターン: {n_list}")
     print(f"  各設定のエピソード数: {EPISODES_PER_CONFIG}")
-    total_configs = len(radius_list) * len(n_list)
-    print(f"  総設定数: {total_configs}")
-    print(f"  総エピソード数: {total_configs * EPISODES_PER_CONFIG}")
+    print(f"  概算総エピソード数: {estimated_total_episodes} (実際は配置不可設定を除外)")
     print(f"  最大ステップ数: {MAX_STEPS}")
-    print(f"  ε探索率: {EPSILON_START} → {EPSILON_END}")
+    print(f"  ε探索率: {EPSILON_START} → {EPSILON_END} (設定変更ごとにリセット)")
     print(f"  保存先: {run_dir}")
     print("=" * 80)
 
@@ -180,23 +188,23 @@ def run_training():
     episode_results = []  # 全エピソードの結果
     start_time = time.time()
 
-    # モデルを1回だけ初期化（V/Hテーブルを共有）
+    # モデルを1回だけ初期化（V/Hテーブルを共有し、設定変更で使い回す）
     print("\nモデルを初期化中...")
     model = FloorFieldModelUnified(
         map_array=map_array,
         sff_path=sff_path,
-        N=n_list[0],  # 初期人数（後で変更可能）
+        N=n_list[0],  # 初期人数（ループ内で変更）
         learning_mode="actor_only",
         pretrained_v_path=PRETRAINED_V_PATH,
         params=MODEL_PARAMS,
     )
     print("✓ モデル初期化完了")
 
-    # 総エピソード数のカウンター
-    total_episodes = total_configs * EPISODES_PER_CONFIG
-    current_episode = 0
+    total_episodes_counter = 0  # 実際に実行した累計エピソード数
     config_idx = 0
+    total_configs_estimated = len(radius_list) * len(n_list)
 
+    # === カリキュラム学習ループ ===
     # 各半径パターンで実行
     for radius in radius_list:
         print("\n" + "=" * 80)
@@ -219,10 +227,10 @@ def run_training():
                 continue
 
             print(
-                f"\n  設定 [{config_idx}/{total_configs}]: radius={radius}, N={N}"
+                f"\n  設定 [{config_idx}/{total_configs_estimated}]: radius={radius}, N={N}"
             )
 
-            # この設定の結果を記録
+            # この設定の結果を記録する辞書
             config_results = {
                 "radius": radius,
                 "N": N,
@@ -232,20 +240,24 @@ def run_training():
                 "avg_steps": [],
             }
 
-            # 人数を設定
+            # モデルの人数を更新
             model.N = N
 
-            # エピソードループ
+            # === エピソードループ ===
             for episode in range(1, EPISODES_PER_CONFIG + 1):
-                current_episode += 1
+                total_episodes_counter += 1
                 episode_start = time.time()
 
-                # ε-greedyの減衰（総エピソード数に対して線形減衰）
-                progress = current_episode / total_episodes
+                # --- 【重要】イプシロンのローカル減衰処理 ---
+                # 現在の設定内での進捗率 (0.0付近 -> 1.0)
+                local_progress = episode / EPISODES_PER_CONFIG
+                
+                # 線形減衰: START(0.2) から END(0.01) へ
                 epsilon = (
-                    EPSILON_START + (EPSILON_END - EPSILON_START) * progress
+                    EPSILON_START + (EPSILON_END - EPSILON_START) * local_progress
                 )
                 model.set_epsilon(epsilon)
+                # ------------------------------------------
 
                 # エピソード実行（半径を指定してリセット）
                 model.reset(exit_pos=exit_pos, radius=radius)
@@ -254,7 +266,6 @@ def run_training():
                 # 結果の記録
                 v_table_size = model.get_v_table_size()
                 h_table_size_info = model.get_h_table_size()
-                # h_table_sizeはタプル(状態数, 総行動数)なので、状態数を取得
                 h_table_size = h_table_size_info[0] if h_table_size_info else 0
                 episode_time = time.time() - episode_start
 
@@ -263,10 +274,10 @@ def run_training():
                 config_results["h_table_sizes"].append(h_table_size)
                 config_results["avg_steps"].append(steps)
 
-                # エピソード結果を記録
+                # エピソード詳細結果を記録
                 episode_results.append(
                     {
-                        "episode_num": current_episode,
+                        "episode_num": total_episodes_counter,
                         "config_idx": config_idx,
                         "radius": radius,
                         "N": N,
@@ -277,44 +288,33 @@ def run_training():
                     }
                 )
 
-                # 進捗表示（10エピソードごと、または最初と最後）
+                # 進捗表示
                 if (
                     episode == 1
-                    or episode % 10 == 0
+                    or episode % 50 == 0
                     or episode == EPISODES_PER_CONFIG
                 ):
-                    elapsed_total = time.time() - start_time
-                    eta_seconds = (
-                        (elapsed_total / progress) * (1 - progress)
-                        if progress > 0
-                        else 0
-                    )
-                    eta_str = time.strftime(
-                        "%H:%M:%S", time.gmtime(eta_seconds)
-                    )
-
-                    # V状態数の表示（タプルの場合は増加数を表示）
+                    # V状態数の表示整形
                     if isinstance(v_table_size, tuple):
                         v_display = f"V:{v_table_size[0]}+{v_table_size[2]}"
                     else:
                         v_display = f"V:{v_table_size}"
 
                     print(
-                        f"    radius={radius:2d} | N={N:3d} | "
-                        f"Ep {episode:3d}/{EPISODES_PER_CONFIG} "
-                        f"(全体{current_episode:4d}/{total_episodes}) | "
-                        f"Steps: {steps:3d} | {v_display} | H:{h_table_size:5d} | "
-                        f"ε:{epsilon:.3f} | "
-                        f"Time: {episode_time:.2f}s | "
-                        f"Progress: {progress*100:.1f}% | ETA: {eta_str}"
+                        f"    Ep {episode:4d}/{EPISODES_PER_CONFIG} "
+                        f"| Steps: {steps:3d} | {v_display} | H:{h_table_size:5d} | "
+                        f"ε:{epsilon:.4f} | "  # イプシロンの現在値を表示
+                        f"Time: {episode_time:.2f}s"
                     )
 
-            # 設定の統計情報
+            # --- 設定終了後の処理 ---
+            
+            # 統計情報
             avg_steps = np.mean(config_results["avg_steps"])
             final_h_size = config_results["h_table_sizes"][-1]
 
             print(
-                f"\n  設定統計 (radius={radius}, N={N}):"
+                f"\n  設定完了 (radius={radius}, N={N}):"
                 f" 平均ステップ数={avg_steps:.2f}, "
                 f"最終H状態数={final_h_size}"
             )
@@ -326,65 +326,53 @@ def run_training():
 
             # Vテーブルを保存
             v_table = model.get_v_table()
-            v_table_size = model.get_v_table_size()
             v_filename = (
                 f"V_actor_radius{radius}_N{N}_"
-                f"ep{current_episode}ep.pkl"
+                f"total{total_episodes_counter}ep.pkl"
             )
             v_intermediate_path = os.path.join(run_dir, v_filename)
             with open(v_intermediate_path, "wb") as f:
                 pickle.dump(v_table, f)
-            print(f"    ✓ Vテーブル保存: {v_intermediate_path}")
 
             # Hテーブルを保存
             h_table = model.get_h_table()
-            h_table_size_info = model.get_h_table_size()
             h_filename = (
                 f"H_actor_radius{radius}_N{N}_"
-                f"ep{current_episode}ep.pkl"
+                f"total{total_episodes_counter}ep.pkl"
             )
             h_intermediate_path = os.path.join(run_dir, h_filename)
             with open(h_intermediate_path, "wb") as f:
                 pickle.dump(h_table, f)
-            print(f"    ✓ Hテーブル保存: {h_intermediate_path}")
+            print(f"    ✓ 保存完了: {h_filename}")
 
             # 結果を全体に追加
             all_results.append(config_results)
 
-    # 最終的なテーブルを保存
+    # === 全学習終了後の処理 ===
     print("\n" + "=" * 80)
-    print("学習完了 - テーブルを保存中...")
+    print("学習完了 - 最終データを保存中...")
     print("=" * 80)
 
-    # Vテーブル
+    # 最終Vテーブル
     v_table = model.get_v_table()
     final_v_size = model.get_v_table_size()
     v_table_path = os.path.join(
-        run_dir, f"V_actor_total{total_episodes}ep.pkl"
+        run_dir, f"V_actor_FINAL_total{total_episodes_counter}ep.pkl"
     )
     with open(v_table_path, "wb") as f:
         pickle.dump(v_table, f)
     print(f"✓ Vテーブル保存: {v_table_path}")
-    if isinstance(final_v_size, tuple):
-        print(
-            f"  V状態数: 初期{final_v_size[0]} + 新規{final_v_size[2]} = 現在{final_v_size[1]}"
-        )
-    else:
-        print(f"  V状態数: {final_v_size}")
 
-    # Hテーブル
+    # 最終Hテーブル
     h_table = model.get_h_table()
     final_h_size_info = model.get_h_table_size()
-    # h_table_sizeはタプル(状態数, 総行動数)
     final_h_size = final_h_size_info[0] if final_h_size_info else 0
-    final_h_actions = final_h_size_info[1] if final_h_size_info else 0
     h_table_path = os.path.join(
-        run_dir, f"H_actor_total{total_episodes}ep.pkl"
+        run_dir, f"H_actor_FINAL_total{total_episodes_counter}ep.pkl"
     )
     with open(h_table_path, "wb") as f:
         pickle.dump(h_table, f)
     print(f"✓ Hテーブル保存: {h_table_path}")
-    print(f"  H状態数: {final_h_size}, 総行動数: {final_h_actions}")
 
     # 全体の統計情報
     total_time = time.time() - start_time
@@ -392,13 +380,10 @@ def run_training():
     print("全体の統計情報")
     print("=" * 80)
     print(f"総実行時間: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
-    print(f"総エピソード数: {total_episodes}")
-    print(f"平均エピソード時間: {total_time / total_episodes:.2f}秒")
-    print(
-        f"学習データ: {len(radius_list)}種類の半径 × {len(n_list)}種類の人数 × {EPISODES_PER_CONFIG}エピソード"
-    )
+    print(f"総実行エピソード数: {total_episodes_counter}")
+    print(f"平均エピソード時間: {total_time / total_episodes_counter:.2f}秒")
 
-    # 結果の保存
+    # 結果オブジェクトの保存
     results_path = os.path.join(run_dir, "training_results.pkl")
     with open(results_path, "wb") as f:
         pickle.dump(
@@ -410,28 +395,25 @@ def run_training():
                 "exit_pos": exit_pos,
                 "pretrained_v_path": PRETRAINED_V_PATH,
                 "results_by_config": all_results,
-                "all_episodes": episode_results,  # 全エピソードの詳細
+                "all_episodes": episode_results,
                 "total_time": total_time,
                 "final_v_table_size": final_v_size,
                 "final_h_table_size": final_h_size,
             },
             f,
         )
-    print(f"\n✓ 学習結果を保存しました: {results_path}")
+    print(f"\n✓ 学習結果オブジェクトを保存しました: {results_path}")
 
-    # 各エピソードのステップ数をCSVファイルに保存
+    # CSVファイル保存
     steps_csv_path = os.path.join(run_dir, "steps_per_episode.csv")
     with open(steps_csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        # ヘッダー
         writer.writerow([
             "episode_num", "config_idx", "radius", "N",
             "steps", "v_table_size", "h_table_size", "epsilon"
         ])
-        # データ（各エピソードのステップ数を保存）
         for ep_result in episode_results:
             v_size = ep_result["v_table_size"]
-            # タプルの場合は文字列に変換
             if isinstance(v_size, tuple):
                 v_size_str = f"{v_size[0]}+{v_size[2]}"
             else:
@@ -447,69 +429,8 @@ def run_training():
                 ep_result["h_table_size"],
                 f"{ep_result['epsilon']:.6f}"
             ])
-    print(f"✓ 各エピソードのステップ数を保存しました: {steps_csv_path}")
+    print(f"✓ ステップ数ログ(CSV)を保存しました: {steps_csv_path}")
 
-    # サマリーレポートの作成
-    report_path = os.path.join(run_dir, "summary.txt")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("=" * 80 + "\n")
-        f.write("統合Actor学習の実行サマリー（初期配置を半径で制御）\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"実行日時: {timestamp}\n")
-        f.write(
-            f"総実行時間: {time.strftime('%H:%M:%S', time.gmtime(total_time))}\n"
-        )
-        f.write(f"\n事前学習済みCritic: {PRETRAINED_V_PATH}\n")
-        f.write(f"出口位置: {exit_pos}\n")
-        f.write("\n学習結果:\n")
-        if isinstance(final_v_size, tuple):
-            f.write(
-                f"  V状態数: 初期{final_v_size[0]} + "
-                f"新規{final_v_size[2]} = 現在{final_v_size[1]}\n"
-            )
-        else:
-            f.write(f"  V状態数: {final_v_size}\n")
-        f.write(f"  H状態数: {final_h_size}\n")
-        f.write("\n設定:\n")
-        f.write(f"  半径パターン: {radius_list}\n")
-        f.write(f"  人数パターン: {n_list}\n")
-        f.write(f"  総エピソード数: {total_episodes}\n")
-        f.write(f"  エピソード数/設定: {EPISODES_PER_CONFIG}\n")
-        f.write(f"  最大ステップ数: {MAX_STEPS}\n")
-        f.write(f"  ε探索率: {EPSILON_START} → {EPSILON_END}\n")
-        f.write("\nモデルパラメータ:\n")
-        f.write("  [FFMパラメータ]\n")
-        f.write(f"    k_S: {MODEL_PARAMS['k_S']}\n")
-        f.write(f"    k_D: {MODEL_PARAMS['k_D']}\n")
-        f.write(f"    k_A: {MODEL_PARAMS['k_A']}\n")
-        f.write(f"    neighborhood: {MODEL_PARAMS['neighborhood']}\n")
-        f.write("  [学習パラメータ]\n")
-        f.write(f"    alpha_v (Critic学習率): {MODEL_PARAMS['alpha_v']}\n")
-        f.write(f"    alpha_h (Actor学習率): {MODEL_PARAMS['alpha_h']}\n")
-        f.write(f"    gamma (割引率): {MODEL_PARAMS['gamma']}\n")
-        f.write(f"    block_size (状態ブロック): {MODEL_PARAMS['block_size']}\n")
-        f.write("  [報酬設定]\n")
-        f.write(f"    exit_reward: {MODEL_PARAMS['exit_reward']}\n")
-        f.write(f"    step_penalty: {MODEL_PARAMS['step_penalty']}\n")
-        f.write(
-            f"    collision_penalty: {MODEL_PARAMS['collision_penalty']}\n"
-        )
-        f.write("\n設定別の結果:\n")
-        f.write("-" * 80 + "\n")
-        for result in all_results:
-            radius = result["radius"]
-            N = result["N"]
-            avg_steps = np.mean(result["avg_steps"])
-            h_size_start = result["h_table_sizes"][0]
-            h_size_end = result["h_table_sizes"][-1]
-            f.write(
-                f"radius={radius:2d}, N={N:3d}: "
-                f"平均ステップ={avg_steps:6.2f}, "
-                f"H状態数 {h_size_start:5d}→{h_size_end:5d} "
-                f"(+{h_size_end - h_size_start:4d})\n"
-            )
-
-    print(f"✓ サマリーレポートを保存しました: {report_path}")
     print("\n" + "=" * 80)
     print("✅ 全ての学習が完了しました！")
     print("=" * 80)

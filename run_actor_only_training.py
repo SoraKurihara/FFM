@@ -21,13 +21,13 @@ from model.ffm_actor_only import FloorFieldModelActorOnly
 
 # ==================== 設定パラメータ ====================
 # 事前学習済みCriticデータのパス
-PRETRAINED_V_PATH = "output/logs/critic_training/run_20251027_100019/V_integrated_total11000ep.pkl"
+PRETRAINED_V_PATH = "output/logs/critic_training/run_20251206_153157/V_integrated_total11000ep.pkl"
 # PRETRAINED_V_PATH = "output/logs/critic_training/alpha_v_0.01_gamma_0.99/V_integrated_total11000ep.pkl"
 
 # 人数のパターン
 N_FIXED = [1]  # 必ず実行する人数
-N_START = 10  # 10刻みの開始
-N_END = 100  # 10刻みの終了
+N_START = 1  # 10刻みの開始
+N_END = 1  # 10刻みの終了
 N_STEP = 10  # 刻み幅
 
 # エピソード数
@@ -99,6 +99,9 @@ def run_training():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(OUTPUT_DIR, f"run_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
+    # 軌跡保存用ディレクトリ
+    trajectories_dir = os.path.join(run_dir, "trajectories")
+    os.makedirs(trajectories_dir, exist_ok=True)
 
     # 事前学習済みCriticの確認
     if not os.path.exists(PRETRAINED_V_PATH):
@@ -194,7 +197,27 @@ def run_training():
 
             # エピソード実行
             model.reset()
-            steps = model.run(max_steps=MAX_STEPS)
+            # 10エピソードに1回軌跡を保存
+            save_trajectory = episode % 100 == 0
+            if save_trajectory:
+                steps, trajectory = model.run(
+                    max_steps=MAX_STEPS, return_trajectory=True
+                )
+                # 軌跡を保存
+                trajectory_filename = os.path.join(
+                    trajectories_dir,
+                    f"trajectory_N{N}_ep{episode:05d}_total{current_episode:05d}.npz",
+                )
+                np.savez_compressed(
+                    trajectory_filename,
+                    positions=trajectory,
+                    episode=episode,
+                    N=N,
+                    total_episode=current_episode,
+                    steps=steps,
+                )
+            else:
+                steps = model.run(max_steps=MAX_STEPS, return_trajectory=False)
 
             # 結果の記録
             (

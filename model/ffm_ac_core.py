@@ -59,7 +59,7 @@ class FloorFieldModel:
                 (1, 1),
             ]
 
-    def _encode_state(self, x, y, occupancy):
+    def _encode_state(self, x, y, state_map):
         """
         13セル状態エンコーディング
         - 中心を含む3x3（9セル）
@@ -67,16 +67,16 @@ class FloorFieldModel:
 
         Args:
             x, y: エージェントの位置
-            occupancy: 占有マップ（bool配列）
+            state_map: マップ値配列（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
 
         Returns:
             bytes: 状態のハッシュ可能な表現
         """
         # 1. 中心を含む3x3（9セル）を取得
-        local_3x3 = occupancy[max(0, x - 1) : x + 2, max(0, y - 1) : y + 2]
+        local_3x3 = state_map[max(0, x - 1) : x + 2, max(0, y - 1) : y + 2]
 
-        # パディングして3x3に統一
-        padded_3x3 = np.zeros((3, 3), dtype=bool)
+        # パディングして3x3に統一（境界外は2=壁として扱う）
+        padded_3x3 = np.full((3, 3), 2, dtype=np.uint8)  # デフォルトは壁
         start_x = max(0, 1 - x) if x < 1 else 0
         start_y = max(0, 1 - y) if y < 1 else 0
         end_x = start_x + local_3x3.shape[0]
@@ -90,15 +90,17 @@ class FloorFieldModel:
         for dx, dy in ahead_offsets:
             ahead_x, ahead_y = x + dx, y + dy
             if (
-                0 <= ahead_x < occupancy.shape[0]
-                and 0 <= ahead_y < occupancy.shape[1]
+                0 <= ahead_x < state_map.shape[0]
+                and 0 <= ahead_y < state_map.shape[1]
             ):
-                ahead_cells.append(occupancy[ahead_x, ahead_y])
+                ahead_cells.append(int(state_map[ahead_x, ahead_y]))
             else:
-                ahead_cells.append(False)  # 境界外はFalse
+                ahead_cells.append(2)  # 境界外は壁（2）
 
         # 3. 13セルの状態を結合（9セル + 4セル）
-        state_13 = np.concatenate([padded_3x3.flatten(), ahead_cells])
+        state_13 = np.concatenate(
+            [padded_3x3.flatten().astype(int), ahead_cells]
+        )
 
         # 4. 粗い位置情報（ブロックインデックス）
         block_idx = (x // self.block_size, y // self.block_size)
@@ -114,17 +116,17 @@ class FloorFieldModel:
         states = {}  # エージェントの現在状態
         will_exit = {}  # 出口到達フラグ
 
-        # 現在の占有状況を作成
-        occupancy = np.zeros_like(self.map_array, dtype=bool)
+        # マップ値配列を作成（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
+        state_map = self.map_array.copy()
         for pos in self.positions:
-            occupancy[pos[0], pos[1]] = True
+            state_map[pos[0], pos[1]] = 1  # 歩行者を1に設定
 
         for idx in range(self.positions.shape[0]):
             x, y = self.positions[idx]
             current_pos = np.array([x, y])
 
             # 現在の状態をエンコード
-            state = self._encode_state(x, y, occupancy)
+            state = self._encode_state(x, y, state_map)
             states[idx] = state
 
             offsets = np.array(self.neighbors)
@@ -222,15 +224,15 @@ class FloorFieldModel:
                         collision_counts[agent] = collision_count
 
         # 出口に到達した歩行者を除外する前にTD更新を実行
-        # 次の占有状況を作成
-        occupancy_next = np.zeros_like(self.map_array, dtype=bool)
+        # 次のマップ値配列を作成（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
+        state_map_next = self.map_array.copy()
         for pos in next_positions:
             if self.map_array[pos[0], pos[1]] != 3:  # 出口以外
-                occupancy_next[pos[0], pos[1]] = True
+                state_map_next[pos[0], pos[1]] = 1  # 歩行者を1に設定
 
         # TD更新を実行
         self._update_critic(
-            states, will_exit, collision_counts, next_positions, occupancy_next
+            states, will_exit, collision_counts, next_positions, state_map_next
         )
 
         # 出口に到達した歩行者を除外
@@ -247,7 +249,7 @@ class FloorFieldModel:
         will_exit,
         collision_counts,
         next_positions,
-        occupancy_next,
+        state_map_next,
     ):
         """
         TD学習によるCriticの更新
@@ -257,7 +259,7 @@ class FloorFieldModel:
             will_exit: 出口到達フラグ
             collision_counts: 衝突人数
             next_positions: 次の位置
-            occupancy_next: 次の占有状況
+            state_map_next: 次のマップ値配列（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
         """
         for idx in states:
             state = states[idx]
@@ -283,7 +285,7 @@ class FloorFieldModel:
             else:
                 # 次の状態をエンコード
                 x_next, y_next = next_positions[idx]
-                state_next = self._encode_state(x_next, y_next, occupancy_next)
+                state_next = self._encode_state(x_next, y_next, state_map_next)
                 v_next = self.V[state_next]
 
             # TD誤差の計算

@@ -1,8 +1,13 @@
 import pickle
 import random
+import sys
 from collections import defaultdict
 
 import numpy as np
+
+if "numpy._core" not in sys.modules:
+    sys.modules["numpy._core"] = np.core
+    sys.modules["numpy._core.multiarray"] = np.core.multiarray
 
 
 class FloorFieldModelActorOnly:
@@ -49,9 +54,15 @@ class FloorFieldModelActorOnly:
         # Critic: 事前学習済みを読み込み、全状態を更新可能
         if pretrained_v_path:
             with open(pretrained_v_path, "rb") as f:
-                pretrained_v = pickle.load(f)
-            self.V = defaultdict(lambda: 0.0, pretrained_v)
-            self.initial_v_size = len(pretrained_v)
+                pretrained_v_pickled = pickle.load(f)
+            self.V = defaultdict(lambda: 0.0)
+            for k, v in pretrained_v_pickled.items():
+                real_key = pickle.loads(k)
+                clean_key = tuple(
+                    tuple(int(x) for x in sub_tuple) for sub_tuple in real_key
+                )
+                self.V[clean_key] = v
+            self.initial_v_size = len(self.V)
             print(f"✓ 事前学習済みCriticを読み込みました: {self.initial_v_size}状態")
         else:
             self.V = defaultdict(lambda: 0.0)
@@ -145,6 +156,7 @@ class FloorFieldModelActorOnly:
         actions = {}  # エージェントが選択した行動
         action_probs = {}  # 行動選択確率
         action_choices = {}  # 各エージェントの利用可能な行動リスト
+        action_valid_mask = {}  # 各エージェントの行動有効性マスク
 
         # 現在の占有状況を作成（マップの値: 0=空き, 1=歩行者, 2=壁, 3=出口）
         occupancy = np.copy(self.map_array)
@@ -164,88 +176,83 @@ class FloorFieldModelActorOnly:
             offsets = np.array(self.neighbors)
             neighbor_coords = self.positions[idx] + offsets
 
-            # occupied set の numpy版（自分を除外）
-            other_positions = np.delete(self.positions, idx, axis=0)
-            occupied = other_positions.view(
-                [("", other_positions.dtype)] * 2
-            ).reshape(-1)
-
-            # 移動可能セル（壁・出口）
-            mask = (
-                self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-                == 0
-            ) | (
-                self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-                == 3
+            # 境界チェック：マップ範囲内の座標のみを有効とする
+            height, width = self.map_array.shape
+            valid_boundary = (
+                (neighbor_coords[:, 0] >= 0)
+                & (neighbor_coords[:, 0] < height)
+                & (neighbor_coords[:, 1] >= 0)
+                & (neighbor_coords[:, 1] < width)
             )
-            neighbor_coords = neighbor_coords[mask]
-            if neighbor_coords.shape[0] != 4:
-                pass
-            # occupied 判定
-            if neighbor_coords.shape[0] > 0:
-                neighbor_struct = neighbor_coords.view(
-                    [("", neighbor_coords.dtype)] * 2
-                ).reshape(-1)
-                mask = ~np.isin(neighbor_struct, occupied)
-                neighbor_coords = neighbor_coords[mask]
+
+            # 移動可能セル（空きまたは出口のみ許可、壁は除外）
+            valid_map = np.zeros(len(neighbor_coords), dtype=bool)
+            for i, coord in enumerate(neighbor_coords):
+                if valid_boundary[i]:
+                    map_val = self.map_array[coord[0], coord[1]]
+                    valid_map[i] = (map_val == 0) | (map_val == 3)
+
+            # occupied 判定（他の歩行者がいるセルは除外）
+            other_positions = np.delete(self.positions, idx, axis=0)
+            occupied = {(int(p[0]), int(p[1])) for p in other_positions}
+            valid_occupied = np.array(
+                [tuple(coord) not in occupied for coord in neighbor_coords],
+                dtype=bool,
+            )
+
+            # 有効マスク：境界内、移動可能、占有されていない
+            valid_mask = valid_boundary & valid_map & valid_occupied
 
             # ★現在地を追加して「動かない」という選択肢を入れる
-            if neighbor_coords.shape[0] > 0:
-                neighbor_coords = np.vstack([neighbor_coords, current_pos])
+            # 全候補リスト（neighbors + 現在地）を作成
+            all_coords = np.vstack([neighbor_coords, current_pos])
+            # 現在地は常に有効（動かない選択肢）
+            all_valid_mask = np.concatenate([valid_mask, [True]])
 
-                exit_mask = (
-                    self.map_array[
-                        neighbor_coords[:, 0], neighbor_coords[:, 1]
-                    ]
-                    == 3
-                )
+            # 出口チェック（neighbors部分のみ、現在地は除く）
+            exit_mask = np.zeros(len(all_coords), dtype=bool)
+            for i, coord in enumerate(all_coords[:-1]):  # 現在地を除く
+                if (
+                    valid_boundary[i]
+                    and self.map_array[coord[0], coord[1]] == 3
+                ):
+                    exit_mask[i] = True
+
                 if np.any(exit_mask):
-                    chosen_coord = neighbor_coords[exit_mask][0]
+                    # 出口がある場合は最初の出口を強制選択
+                    exit_idx = np.where(exit_mask)[0][0]
+                    chosen_coord = all_coords[exit_idx]
                     will_exit[idx] = True  # 出口到達をマーク
                     if tuple(chosen_coord) not in move_requests:
                         move_requests[tuple(chosen_coord)] = []
                     move_requests[tuple(chosen_coord)].append(idx)
                     # 出口強制時もアクション記録
                     actions[idx] = tuple(chosen_coord)
-                    # INSERT_YOUR_CODE
                     # 出口強制時も action_probs, action_choice を記録
-                    # 強制選択時もchoiceとして保存しないと後でtd_error計算で困る
-                    action_probs[idx] = np.zeros(len(neighbor_coords))
-                    action_probs[idx][0] = 1.0  # 最後の選択肢が現在地(=出口)で必ず選ばれる
+                    action_probs[idx] = np.zeros(len(all_coords))
+                    action_probs[idx][exit_idx] = 1.0
                     action_choices[idx] = [
-                        tuple(coord) for coord in neighbor_coords
+                        tuple(coord) for coord in all_coords
                     ]
+                    action_valid_mask[idx] = all_valid_mask
                     continue
 
-                dff_vals = self.dff[
-                    neighbor_coords[:, 0], neighbor_coords[:, 1]
-                ]
+                # DFF値を取得（全候補に対して）
+                dff_vals = np.array(
+                    [self.dff[coord[0], coord[1]] for coord in all_coords]
+                )
 
                 # Actorのロジット計算: kA * H(s,a) + kD * DFF
-                # 状態をkeyとして行動価値リストを取得
+                # 状態をkeyとして行動価値リストを取得（固定サイズ）
                 state_key = state
-                if state_key not in self.H or len(self.H[state_key]) != len(
-                    neighbor_coords
+                fixed_action_size = len(all_coords)  # neighbors + 現在地
+                if (
+                    state_key not in self.H
+                    or len(self.H[state_key]) != fixed_action_size
                 ):
-                    # 初回または行動数が変わった場合、0で初期化
-                    self.H[state_key] = [0.0] * len(neighbor_coords)
+                    # 初回またはサイズが変わった場合、0で初期化
+                    self.H[state_key] = [0.0] * fixed_action_size
                 h_vals = np.array(self.H[state_key])
-
-                # デバッグ: 配列サイズの確認
-                if len(h_vals) != len(dff_vals):
-                    print(
-                        f"警告: h_vals長さ={len(h_vals)}, dff_vals長さ={len(dff_vals)}"
-                    )
-                    print(f"neighbor_coords長さ={len(neighbor_coords)}")
-                    # サイズを合わせる
-                    if len(h_vals) < len(dff_vals):
-                        h_vals = np.pad(
-                            h_vals,
-                            (0, len(dff_vals) - len(h_vals)),
-                            "constant",
-                        )
-                    else:
-                        h_vals = h_vals[: len(dff_vals)]
 
                 # H値をSFFスケールに規格化（Hテーブル自体は変更しない）
                 if hasattr(self, "sff") and len(self.H) > 0:
@@ -283,38 +290,69 @@ class FloorFieldModelActorOnly:
                     + self.params["k_D"] * dff_vals
                 )
 
+                # 無効な行動のスコアを-infに設定
+                score[~all_valid_mask] = -np.inf
+
                 # NaN/Infチェック
                 if np.any(np.isnan(score)) or np.any(np.isinf(score)):
-                    # 不正な値が含まれている場合はランダム選択
-                    score = np.zeros_like(score)
+                    # 不正な値が含まれている場合は有効な行動のみランダム選択
+                    valid_indices = np.where(all_valid_mask)[0]
+                    if len(valid_indices) > 0:
+                        score = np.zeros_like(score)
+                        score[all_valid_mask] = 1.0
+                    else:
+                        score = np.zeros_like(score)
 
-                score_max = np.max(score)
+                # 有効な行動のみでスコアの最大値を計算
+                valid_scores = score[all_valid_mask]
+                if len(valid_scores) > 0:
+                    score_max = np.max(valid_scores)
+                else:
+                    score_max = 0.0
 
                 probs = np.exp(score - score_max)
+                # 無効な行動の確率を0に
+                probs[~all_valid_mask] = 0.0
                 probs_sum = probs.sum()
-                if np.isfinite(probs_sum) and probs_sum != 0:
+                if np.isfinite(probs_sum) and probs_sum > 0:
                     probs /= probs_sum
-                    # ε-greedy: εの確率で完全にランダム移動
-                    if self.epsilon > 0 and random.random() < self.epsilon:
-                        chosen_idx = np.random.randint(len(neighbor_coords))
-                        probs_record = np.zeros(len(neighbor_coords))
+                else:
+                    # フォールバック: 有効な行動から均一に選択
+                    valid_indices = np.where(all_valid_mask)[0]
+                    if len(valid_indices) > 0:
+                        probs = np.zeros_like(score)
+                        probs[valid_indices] = 1.0 / len(valid_indices)
+                    else:
+                        probs = np.zeros_like(score)
+
+                # ε-greedy: εの確率で完全にランダム移動（有効な行動のみ）
+                if self.epsilon > 0 and random.random() < self.epsilon:
+                    valid_indices = np.where(all_valid_mask)[0]
+                    if len(valid_indices) > 0:
+                        chosen_idx = valid_indices[
+                            np.random.randint(len(valid_indices))
+                        ]
+                        probs_record = np.zeros(len(all_coords))
                         probs_record[chosen_idx] = 1.0
                     else:
-                        chosen_idx = np.random.choice(
-                            len(neighbor_coords), p=probs
-                        )
-                        probs_record = probs
-                    chosen = tuple(neighbor_coords[chosen_idx])
-                    if chosen not in move_requests:
-                        move_requests[chosen] = []
-                    move_requests[chosen].append(idx)
+                        # フォールバック: 現在地を選択
+                        chosen_idx = len(all_coords) - 1
+                        probs_record = np.zeros(len(all_coords))
+                        probs_record[chosen_idx] = 1.0
+                else:
+                    chosen_idx = np.random.choice(len(all_coords), p=probs)
+                    probs_record = probs
 
-                    # Actor学習用の記録
-                    actions[idx] = chosen
-                    action_probs[idx] = probs_record
-                    action_choices[idx] = [
-                        tuple(coord) for coord in neighbor_coords
-                    ]
+                chosen = tuple(all_coords[chosen_idx])
+                if chosen not in move_requests:
+                    move_requests[chosen] = []
+                move_requests[chosen].append(idx)
+
+                # Actor学習用の記録
+                actions[idx] = chosen
+                action_probs[idx] = probs_record
+                action_choices[idx] = [tuple(coord) for coord in all_coords]
+                action_valid_mask[idx] = all_valid_mask
 
         # 衝突カウントを記録
         collision_counts = {}  # エージェントごとの衝突人数
@@ -354,7 +392,12 @@ class FloorFieldModelActorOnly:
 
         # Actor更新
         self._update_actor(
-            states, actions, action_choices, action_probs, td_errors
+            states,
+            actions,
+            action_choices,
+            action_probs,
+            action_valid_mask,
+            td_errors,
         )
 
         # 出口に到達した歩行者を除外
@@ -428,7 +471,13 @@ class FloorFieldModelActorOnly:
         return td_errors
 
     def _update_actor(
-        self, states, actions, action_choices, action_probs, td_errors
+        self,
+        states,
+        actions,
+        action_choices,
+        action_probs,
+        action_valid_mask,
+        td_errors,
     ):
         """
         方策勾配法によるActorの更新
@@ -436,8 +485,9 @@ class FloorFieldModelActorOnly:
         Args:
             states: エージェントの現在状態
             actions: エージェントが選択した行動
-            action_choices: 各エージェントの利用可能な行動リスト
+            action_choices: 各エージェントの利用可能な行動リスト（固定サイズ）
             action_probs: 行動選択確率
+            action_valid_mask: 各エージェントの行動有効性マスク
             td_errors: TD誤差
         """
         for idx in states:
@@ -445,6 +495,7 @@ class FloorFieldModelActorOnly:
                 idx not in actions
                 or idx not in td_errors
                 or idx not in action_choices
+                or idx not in action_valid_mask
             ):
                 continue
 
@@ -452,7 +503,10 @@ class FloorFieldModelActorOnly:
             action = actions[idx]
             td_error = td_errors[idx]
             choices = action_choices[idx]
-            probs = action_probs[idx]
+            probs = action_probs[idx]  # 将来の拡張用（選択されなかった行動の更新に使用可能）
+            valid_mask = action_valid_mask[
+                idx
+            ]  # 将来の拡張用（無効な行動の更新をスキップするために使用可能）
 
             # 選択された行動のインデックスを見つける
             try:
@@ -460,14 +514,18 @@ class FloorFieldModelActorOnly:
             except ValueError:
                 continue
 
-            # 状態をkeyとして行動価値リストを更新
+            # 状態をkeyとして行動価値リストを更新（固定サイズ）
             state_key = state
-            if state_key not in self.H or len(self.H[state_key]) != len(
-                choices
+            fixed_action_size = len(choices)
+            if (
+                state_key not in self.H
+                or len(self.H[state_key]) != fixed_action_size
             ):
-                self.H[state_key] = [0.0] * len(choices)
-            # 全ての行動についてH値を更新
+                self.H[state_key] = [0.0] * fixed_action_size
+            # 全ての行動についてH値を更新（有効な行動のみ）
             for i, choice in enumerate(choices):
+                if not valid_mask[i]:
+                    continue  # 無効な行動は更新しない
                 if i == chosen_idx:
                     # 選択された行動: H(s,a) += α_h * δ * (1 - π(a|s))
                     self.H[state_key][i] += self.alpha_h * td_error
@@ -552,7 +610,13 @@ class FloorFieldModelActorOnly:
         total_actions = sum(len(actions) for actions in self.H.values())
         return (len(self.H), total_actions)
 
-    def run(self, save_prefix=None, save_interval=100, max_steps=None):
+    def run(
+        self,
+        save_prefix=None,
+        save_interval=100,
+        max_steps=None,
+        return_trajectory=False,
+    ):
         """
         シミュレーションを実行
 
@@ -560,11 +624,14 @@ class FloorFieldModelActorOnly:
             save_prefix: 保存用プレフィックス
             save_interval: 保存間隔
             max_steps: 最大ステップ数（Noneの場合は無制限）
+            return_trajectory: 軌跡を返すかどうか
 
         Returns:
-            int: 実行ステップ数
+            int: 実行ステップ数（return_trajectory=Falseの場合）
+            tuple: (実行ステップ数, 軌跡)（return_trajectory=Trueの場合）
         """
         buffer = []
+        trajectory = [] if return_trajectory else None
         step = 0
 
         while self.positions.shape[0] > 0:
@@ -572,7 +639,10 @@ class FloorFieldModelActorOnly:
                 break
 
             self.step()
-            buffer.append(np.copy(self.positions))
+            positions_copy = np.copy(self.positions)
+            buffer.append(positions_copy)
+            if return_trajectory:
+                trajectory.append(positions_copy)
             step += 1
 
             if save_prefix and (step % save_interval == 0):
@@ -588,4 +658,7 @@ class FloorFieldModelActorOnly:
                 positions=np.array(buffer, dtype=np.int32),
             )
 
+        if return_trajectory:
+            return step, np.array(trajectory, dtype=object)
+        return step
         return step
