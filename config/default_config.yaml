@@ -9,5 +9,11 @@ params:
   decay: 0.2
   # neighborhood: moore
   neighborhood: neumann
+  k_A: 3
+  # optional tuning
+  congestion_tax: 0.20
+  congestion_tax_exempt_exit: true
+  local_front_density_mu: 0.02
+  max_steps: 500
 
 seed: 42

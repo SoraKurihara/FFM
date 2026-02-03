@@ -1,6 +1,5 @@
 import pickle
 import random
-import struct
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -8,332 +7,361 @@ import numpy as np
 
 class FloorFieldModel:
     """
-    - Selection: softmax over pre-softmax mix val = beta*FFM + (1-beta)*k_Q*Q
-    - SFF/DFF kept; DFF evolves each step
-    - MC (reverse) update at exit/timeout
-    - Collision penalty only to agents who failed to move
-    - Fast state encoding: bytes (3x3 local map + 3x3 occupancy, uint8) + packed block index
-    - 3x3 extraction via padding (no nested loops)
+    Floor-Field Model with target-centric Q-learning (Monte Carlo, reverse).
+
+    State key  : (combined3x3.tobytes(), (block_x, block_y))
+      - combined3x3 = map3x3 + occ3x3
+        map codes: free=0, wall/OOB=2, exit=3
+        occ3x3   : other agents only (0/1). Ensure occ3x3[map3x3!=0]=0
+      - block_x, block_y = x//3, y//3 (coarse location)
+
+    Action set : [FROM_UP, FROM_DOWN, FROM_LEFT, FROM_RIGHT, FROM_SELF]
+                 indices: 0,1,2,3,4 (STOP is FROM_SELF)
+
+    Selection  : For each candidate target T, build S_target(T) and read Q[S_target][from_dir].
+                 Logit(T) = beta * (-k_S * SFF[T]) + k_D * DFF[T] + k_Q * Q_value
+                 STOP uses: Logit(STOP) = k_Q * Q_value   (no SFF/DFF for STOP)
+                 Missing Q -> fallback 0 (do NOT create entries on read path).
+
+    Learning   : Reverse Monte Carlo with per-step immediate rewards already logged.
+                 On agent exit, add exit_reward to the last step and back up G.
+                 On conflict loss, overwrite last reward with -collision_penalty.
+
+    DFF update : Increment only when an agent actually moved (not on STOP).
     """
 
-    def __init__(
-        self,
-        map_array: np.ndarray,
-        sff_path: str,
-        N: int,
-        params: Dict = None,
-        state_encoding: str = "bytes",   # "bytes" (fast, default) or "tuple"
-        block_size: int = 3,
-        state_radius: int = 1,           # ← 3x3 (=2*1+1)
-    ):
-        # ---------------- Params ----------------
+    # Action indices (Neumann + STOP)
+    FROM_UP = 0
+    FROM_DOWN = 1
+    FROM_LEFT = 2
+    FROM_RIGHT = 3
+    FROM_SELF = 4  # STOP
+
+    def __init__(self,
+                 map_array: np.ndarray,
+                 sff_path: str,
+                 N: int,
+                 params: Dict = None):
         default_params = {
             "k_S": 3.0,
             "k_D": 1.0,
+            "k_Q": 1.0,
             "diffuse": 0.2,
             "decay": 0.2,
-            "neighborhood": "moore",      # 実行側のconfigで "neumann" に上書きされます
-            # rewards & episode control
-            "success_reward": 100.0,
-            "timeout_penalty": -20.0,
-            "step_penalty": -0.01,
-            "stop_penalty": -0.2,
-            "collision_penalty": -1.0,
-            "direction_keep_bonus": 0.05,
-            "backtrack_penalty": 0.1,     # subtracted when applied
+            "neighborhood": "neumann",
+            # rewards (costs are positive here; applied as negative rewards)
+            "step_penalty": 0.00,#0.01,
+            "stop_penalty": 0.00,#0.30,
+            "collision_penalty": 0.00,#0.70,
+            "exit_reward": 100.0,
+            "timeout_penalty": 50.0,
             "max_steps": 500,
-            # Q scaling
-            "k_Q": 1.0,                   # 先輩はここを 5 に設定
         }
         self.params = default_params if params is None else {**default_params, **params}
 
-        # ---------------- Fields ----------------
-        self.map_array = map_array.astype(np.uint8, copy=False)
-        self.sff = np.load(sff_path, mmap_mode="r")   # FFMに使用
-        self.dff = np.zeros_like(self.map_array, dtype=np.float32)
+        # map / fields
+        self.map_array = map_array.astype(np.uint8)
+        self.sff = np.load(sff_path, mmap_mode='r')  # static floor field (distance-like)
+        self.dff = np.zeros_like(self.map_array, dtype=np.float32)  # dynamic (footprints)
 
+        # agents
         self.N = int(N)
-        self.block_size = int(block_size)
-        self.state_encoding = state_encoding
-        self.state_radius = int(state_radius)         # ← 3x3 用
-        self.win = 2 * self.state_radius + 1
-
-        # neighbors & action mapping
-        self.neighbors = self._get_neighbors(self.params["neighborhood"])
-        self.neighbor_offsets = np.array(self.neighbors, dtype=np.int8)  # (K,2)
-        self.action_size = len(self.neighbors) + 1  # + stop
-        self.stop_action = self.action_size - 1
-        self.delta_to_action = {tuple(delta): i for i, delta in enumerate(self.neighbors)}
-        self.delta_to_action[(0, 0)] = self.stop_action
-
-        # agent state
         self.positions = self._initialize_agents()
-        self.prev_direction = np.zeros((self.N, 2), dtype=np.int8)
+        self.prev_direction = np.zeros((self.N, 2), dtype=np.int16)
 
-        # RL
-        self.Q: Dict[bytes, np.ndarray] = {}
+        # neighborhood (force Neumann for action mapping)
+        self.neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # UP, DOWN, LEFT, RIGHT
+
+        # learning (Monte Carlo)
+        self.Q: Dict[Tuple[bytes, Tuple[int, int]], np.ndarray] = {}
         self.alpha = 0.1
-        self.gamma = 0.99                 # ← デフォルトを 0.99 に
-        self.paths: List[List[Tuple[bytes, int, float]]] = [[] for _ in range(self.N)]
+        self.gamma = 0.99
+        self.paths: List[List[Tuple[Tuple[bytes, Tuple[int, int]], int, float]]] = [
+            [] for _ in range(self.N)
+        ]
+        self.action_size = 5  # FROM_UP/DOWN/LEFT/RIGHT/SELF
 
-        # episode
-        self.step_count = 0
+        # workspace buffers
+        self._H, self._W = self.map_array.shape
+        self._passable_mask = (self.map_array == 0) | (self.map_array == 3)
 
-        # static padded map for 3x3 slicing
-        self._map_padded = np.pad(self.map_array, self.state_radius, mode="constant")
+        # episode step counter & limits
+        self.max_steps = int(self.params["max_steps"])
+        self._step_count = 0
 
-    # ---------------- Init helpers ----------------
-    def _get_neighbors(self, neighborhood: str):
-        if neighborhood == "neumann":
-            return [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        # moore
-        return [(-1, -1), (-1, 0), (-1, 1),
-                (0, -1),            (0, 1),
-                (1, -1),  (1, 0),   (1, 1)]
-
+    # -----------------------------
+    # Initialization & Reset
+    # -----------------------------
     def _initialize_agents(self) -> np.ndarray:
+        """Place N agents uniformly at random on free cells (map==0)."""
         free_cells = np.argwhere(self.map_array == 0)
-        selected = free_cells[np.random.choice(len(free_cells), self.N, replace=False)]
-        return selected.astype(np.int32, copy=False)
+        idx = np.random.choice(len(free_cells), self.N, replace=False)
+        return free_cells[idx].astype(np.int16)
 
-    # ---------------- Public API ----------------
-    def reset(self):
+    def reset(self) -> None:
         self.positions = self._initialize_agents()
+        self.prev_direction = np.zeros((self.N, 2), dtype=np.int16)
         self.dff.fill(0.0)
-        self.prev_direction.fill(0)
         self.paths = [[] for _ in range(self.N)]
-        self.step_count = 0
+        self._step_count = 0
 
-    def save_Q(self, filepath: str):
-        with open(filepath, "wb") as f:
-            pickle.dump(self.Q, f)
+    # -----------------------------
+    # State construction (target-centric)
+    # -----------------------------
+    @staticmethod
+    def _block_index(x: int, y: int, block_size: int = 3) -> Tuple[int, int]:
+        return (x // block_size, y // block_size)
 
-    # ---------------- State encoding ----------------
-    def _get_block_index(self, x: int, y: int) -> Tuple[int, int]:
-        return (x // self.block_size, y // self.block_size)
-
-    def _encode_state_tuple(self, x: int, y: int, occ_pad: np.ndarray):
-        r = self.state_radius
-        mp = self._map_padded[x: x + 2*r + 1, y: y + 2*r + 1].astype(np.uint8, copy=False)
-        oc = occ_pad[x: x + 2*r + 1, y: y + 2*r + 1].astype(np.uint8, copy=True)
-        oc[r, r] = 0  # 自分は除外
-        combined = (mp + oc).reshape(-1)
-        return (tuple(combined.tolist()), self._get_block_index(x, y))
-
-    # ---------------- Main step ----------------
-    def step(self, beta: float):
+    def _combined3x3_at_target(self, tx: int, ty: int, occ_grid: np.ndarray, self_xy: Tuple[int, int]) -> np.ndarray:
+        """Build combined3x3 = map3x3 + occ3x3 around target (tx,ty).
+        - map codes: free=0, wall/OOB=2, exit=3
+        - occ3x3: others only (0/1), and enforce occ3x3[map!=0]=0
+        - self agent must be excluded even if inside the 3x3 window.
         """
-        beta is provided from the outer schedule.
-        Selection: softmax over pre-softmax mix val = beta*FFM + (1-beta)*k_Q*Q
-        """
-        self.step_count += 1
-        H, W = self.map_array.shape
-        r = self.state_radius
-        win = self.win
+        H, W = self._H, self._W
+        c = np.full((3, 3), 2, dtype=np.uint8)  # OOB=2
+        x0, y0 = tx - 1, ty - 1
+        # fill map window
+        ix0, ix1 = max(0, x0), min(H, tx + 2)
+        iy0, iy1 = max(0, y0), min(W, ty + 2)
+        c[(ix0 - x0):(ix1 - x0), (iy0 - y0):(iy1 - y0)] = self.map_array[ix0:ix1, iy0:iy1]
 
-        # occupancy (True: occupied now)
-        occupancy = np.zeros((H, W), dtype=bool)
-        occupancy[self.positions[:, 0], self.positions[:, 1]] = True
-        occupancy_padded = np.pad(occupancy, r, mode="constant")
+        # occupancy window (copy from occ_grid)
+        occ = np.zeros((3, 3), dtype=np.uint8)
+        occ[(ix0 - x0):(ix1 - x0), (iy0 - y0):(iy1 - y0)] = occ_grid[ix0:ix1, iy0:iy1].astype(np.uint8)
+
+        # # exclude self if inside the 3x3
+        # sx, sy = self_xy
+        # if abs(sx - tx) <= 1 and abs(sy - ty) <= 1:
+        #     occ[sx - tx + 1, sy - ty + 1] = 0
+
+        # enforce occ only on free cells
+        occ[c != 0] = 0
+        return (c + occ).astype(np.uint8)
+
+    # -----------------------------
+    # One simulation step
+    # -----------------------------
+    def step(self, beta: float) -> None:
+        H, W = self._H, self._W
+        k_S = float(self.params["k_S"])  # SFF weight
+        k_D = float(self.params["k_D"])  # DFF weight
+        k_Q = float(self.params["k_Q"])  # Q   weight
+
+        step_pen = float(self.params["step_penalty"])     # cost (will be negative reward)
+        stop_pen = float(self.params["stop_penalty"])     # cost
+        coll_pen = float(self.params["collision_penalty"])  # cost
+
+        # step counter
+        self._step_count += 1
+
+        # occupancy grid (bool) at current frame
+        occ_grid = np.zeros((H, W), dtype=np.bool_)
+        occ_grid[self.positions[:, 0], self.positions[:, 1]] = True
 
         move_requests: Dict[Tuple[int, int], List[int]] = {}
+        decisions: Dict[int, Tuple[Tuple[int, int], int]] = {}  # idx -> (target, action_idx)
         next_positions = self.positions.copy()
         arrived_indices: List[int] = []
 
-        k_S = float(self.params["k_S"])
-        k_D = float(self.params["k_D"])
-        k_Q = float(self.params.get("k_Q", 1.0))
+        # fast mask for current occupancy (structured view trick is not needed here)
+        occupied_struct = self.positions.view([('', self.positions.dtype)] * 2).reshape(-1)
 
         for idx in range(self.positions.shape[0]):
             x, y = int(self.positions[idx, 0]), int(self.positions[idx, 1])
 
-            # ---- state (3x3 map + 3x3 occupancy, center=0) ----
-            mp = self._map_padded[x: x + win, y: y + win].astype(np.uint8, copy=False)
-            oc = occupancy_padded[x: x + win, y: y + win].astype(np.uint8, copy=True)
-            oc[r, r] = 0
-            combined = mp + oc
-            bx, by = self._get_block_index(x, y)
-            if self.state_encoding == "bytes":
-                state = combined.tobytes() + struct.pack("HH", bx, by)
+            # candidate targets: 4-neighbors that are passable & not currently occupied, plus STOP
+            cand = []  # list of (tx,ty, action_idx)
+            for a_idx, (dx, dy) in enumerate(self.neighbors):
+                tx, ty = x + dx, y + dy
+                if 0 <= tx < H and 0 <= ty < W and self._passable_mask[tx, ty]:
+                    # cannot target a cell currently occupied at time t
+                    key_struct = np.array([(tx, ty)], dtype=self.positions.dtype).view([('', self.positions.dtype)] * 2).reshape(-1)[0]
+                    if key_struct not in occupied_struct:
+                        cand.append((tx, ty, self._dir_to_from(x, y, tx, ty)))
+            # STOP
+            cand.append((x, y, FloorFieldModel.FROM_SELF))
+
+            # build logits for softmax
+            logits: List[float] = []
+            states_for_log: List[Tuple[Tuple[bytes, Tuple[int, int]], int]] = []  # (state_key, action_idx)
+            for (tx, ty, a_idx) in cand:
+                # target-centric state
+                combined = self._combined3x3_at_target(tx, ty, occ_grid, (x, y))
+                state_key = (combined.tobytes(), self._block_index(tx, ty))
+                q_vec = self.Q.get(state_key, None)
+                q_val = 0.0 if (q_vec is None) else float(q_vec[a_idx])
+
+                logit = beta * (-k_S * float(self.sff[tx, ty])) + k_D * float(self.dff[tx, ty]) + (1-beta) * k_Q * q_val
+                logits.append(logit)
+                states_for_log.append((state_key, a_idx))
+
+            # softmax over logits
+            logits_arr = np.asarray(logits, dtype=np.float64)
+            mx = np.max(logits_arr)
+            probs = np.exp(logits_arr - mx)
+            s = probs.sum()
+            if not np.isfinite(s) or s <= 0:
+                # skip (no decision) – extremely unlikely; treat as STOP locally
+                chosen = len(cand) - 1  # STOP entry
             else:
-                state = (tuple(combined.reshape(-1).tolist()), (bx, by))
+                probs /= s
+                chosen = int(np.random.choice(len(cand), p=probs))
 
-            # init Q[state]
-            if state not in self.Q:
-                self.Q[state] = np.zeros(self.action_size, dtype=np.float32)
+            tx, ty, a_idx = cand[chosen]
+            state_key, a_for_log = states_for_log[chosen]
 
-            # ---- candidates (legal per map; exclude currently occupied), + stop ----
-            neighbor_coords = self.positions[idx] + self.neighbor_offsets  # (K,2)
-            legal = (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 0) | \
-                    (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3)
-            neighbor_coords = neighbor_coords[legal]
-
-            if neighbor_coords.size > 0:
-                occ_mask = ~occupancy[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-                neighbor_coords = neighbor_coords[occ_mask]
-
-            current_pos = np.array([x, y], dtype=np.int32)
-            if neighbor_coords.size == 0:
-                neighbor_coords = current_pos.reshape(1, 2)
+            # immediate reward (preliminary). Will be overwritten if conflict occurs or exit happens
+            if a_idx == FloorFieldModel.FROM_SELF:
+                reward = -stop_pen
             else:
-                neighbor_coords = np.vstack([neighbor_coords, current_pos])
+                reward = -step_pen
 
-            deltas = neighbor_coords - current_pos
-            action_indices = np.fromiter(
-                (self.delta_to_action.get((int(dx), int(dy)), self.stop_action) for dx, dy in deltas),
-                dtype=np.int32, count=deltas.shape[0]
-            )
+            # log (target-centric)
+            self._ensure_qvec(state_key)
+            self.paths[idx].append((state_key, a_for_log, reward))
 
-            # ---- exit immediate (deterministic) ----
-            exit_mask = (self.map_array[neighbor_coords[:, 0], neighbor_coords[:, 1]] == 3)
-            if np.any(exit_mask):
-                chosen_idx = int(np.where(exit_mask)[0][0])
-                chosen_coord = tuple(neighbor_coords[chosen_idx])
-                action = int(action_indices[chosen_idx])
+            # register move request
+            decisions[idx] = ((tx, ty), a_idx)
+            move_requests.setdefault((tx, ty), []).append(idx)
 
-                reward = float(self.params["step_penalty"])
-                if chosen_coord == (x, y):
-                    reward += (self.params["stop_penalty"] - self.params["step_penalty"])
-
-                self.paths[idx].append((state, action, reward))
-                move_requests.setdefault(chosen_coord, []).append(idx)
-                continue
-
-            # ---- values: pre-softmax mix ----
-            sff_vals = self.sff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-            dff_vals = self.dff[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-            q_vals = self.Q[state][action_indices]
-
-            ffm_vals = (-k_S * sff_vals + k_D * dff_vals).astype(np.float32, copy=False)
-            val = beta * ffm_vals + (1.0 - beta) * (k_Q * q_vals)
-
-            # softmax (stable)
-            logits = val - np.max(val)
-            probs = np.exp(logits.astype(np.float64))
-            sum_probs = probs.sum()
-            if sum_probs == 0.0 or not np.isfinite(sum_probs):
-                probs = np.ones_like(probs, dtype=np.float64) / probs.size
-            else:
-                probs /= sum_probs
-
-            chosen_idx = int(np.random.choice(len(neighbor_coords), p=probs))
-            chosen_coord = tuple(neighbor_coords[chosen_idx])
-            action = int(action_indices[chosen_idx])
-
-            reward = float(self.params["step_penalty"])
-            if chosen_coord == (x, y):
-                reward += (self.params["stop_penalty"] - self.params["step_penalty"])
-
-            self.paths[idx].append((state, action, reward))
-            move_requests.setdefault(chosen_coord, []).append(idx)
-
-        # ---------------- resolve moves ----------------
-        arrived_indices.clear()
-        for target, agents in move_requests.items():
+        # resolve moves & apply DFF and arrivals
+        for (tx, ty), agents in move_requests.items():
             if len(agents) == 1:
-                idx = agents[0]
-                prev_pos = tuple(self.positions[idx])
-                next_positions[idx] = target
-
-                move_vec = (np.array(target) - self.positions[idx]).astype(np.int8, copy=False)
-                if (move_vec != 0).any():
-                    if np.array_equal(move_vec, self.prev_direction[idx]):
-                        s, a, r = self.paths[idx][-1]
-                        self.paths[idx][-1] = (s, a, r + self.params["direction_keep_bonus"])
-                    elif np.array_equal(move_vec, -self.prev_direction[idx]):
-                        s, a, r = self.paths[idx][-1]
-                        self.paths[idx][-1] = (s, a, r - self.params["backtrack_penalty"])
-
-                self.prev_direction[idx] = move_vec
-                if (move_vec != 0).any():
-                    self.dff[prev_pos[0], prev_pos[1]] += 1.0
-
-                if self.map_array[target[0], target[1]] == 3:
-                    arrived_indices.append(idx)
-
+                i = agents[0]
+                src = (int(self.positions[i, 0]), int(self.positions[i, 1]))
+                if (tx, ty) != src:
+                    # move succeeds
+                    self.dff[src[0], src[1]] += 1.0
+                    next_positions[i, 0], next_positions[i, 1] = tx, ty
+                    self.prev_direction[i] = np.array([tx - src[0], ty - src[1]], dtype=np.int16)
+                # arrival?
+                if self.map_array[tx, ty] == 3:
+                    arrived_indices.append(i)
             else:
-                # collision group: maybe one winner passes
-                allow_one = (np.random.rand() < 0.5)
-                winner = None
-                if allow_one:
-                    winner = random.choice(agents)
-                    prev_pos = tuple(self.positions[winner])
-                    next_positions[winner] = target
-                    move_vec = (np.array(target) - self.positions[winner]).astype(np.int8, copy=False)
+                # conflict: one randomly wins, others lose
+                winner = random.choice(agents)
+                for i in agents:
+                    src = (int(self.positions[i, 0]), int(self.positions[i, 1]))
+                    if i == winner:
+                        if (tx, ty) != src:
+                            self.dff[src[0], src[1]] += 1.0
+                            next_positions[i, 0], next_positions[i, 1] = tx, ty
+                            self.prev_direction[i] = np.array([tx - src[0], ty - src[1]], dtype=np.int16)
+                        if self.map_array[tx, ty] == 3:
+                            arrived_indices.append(i)
+                    else:
+                        # overwrite the last reward with collision penalty (loss)
+                        if self.paths[i]:
+                            sk, ac, _ = self.paths[i][-1]
+                            self.paths[i][-1] = (sk, ac, -coll_pen)
 
-                    if (move_vec != 0).any():
-                        if np.array_equal(move_vec, self.prev_direction[winner]):
-                            s, a, r = self.paths[winner][-1]
-                            self.paths[winner][-1] = (s, a, r + self.params["direction_keep_bonus"])
-                        elif np.array_equal(move_vec, -self.prev_direction[winner]):
-                            s, a, r = self.paths[winner][-1]
-                            self.paths[winner][-1] = (s, a, r - self.params["backtrack_penalty"])
-
-                    self.prev_direction[winner] = move_vec
-                    if (move_vec != 0).any():
-                        self.dff[prev_pos[0], prev_pos[1]] += 1.0
-
-                    if self.map_array[target[0], target[1]] == 3:
-                        arrived_indices.append(winner)
-
-                # losers only: collision penalty
-                for idx in agents:
-                    if (winner is not None) and (idx == winner):
-                        continue
-                    if self.paths[idx]:
-                        s, a, _ = self.paths[idx][-1]
-                        self.paths[idx][-1] = (s, a, float(self.params["collision_penalty"]))
-                    # prev_direction unchanged; no DFF increment
-
-        # commit new positions
+        # commit positions
         self.positions = next_positions
 
-        # ---------------- arrivals: MC reverse update ----------------
+        # process arrivals: add exit reward to last step, then MC backup + remove agent
         for idx in sorted(arrived_indices, reverse=True):
-            path = self.paths[idx]
-            if path:
-                s, a, r = path[-1]
-                path[-1] = (s, a, r + float(self.params["success_reward"]))
-            self._mc_update_and_remove(idx)
+            if self.paths[idx]:
+                sk, ac, _ = self.paths[idx][-1]
+                self.paths[idx][-1] = (sk, ac, float(self.params["exit_reward"]))
 
-        # ---------------- timeout handling ----------------
-        if self.step_count >= int(self.params["max_steps"]) and self.positions.size > 0:
-            for local_idx in reversed(range(self.positions.shape[0])):
-                path = self.paths[local_idx]
-                if path:
-                    s, a, r = path[-1]
-                    path[-1] = (s, a, r + float(self.params["timeout_penalty"]))
-                self._mc_update_and_remove(local_idx)
-            self.step_count = 0
+            # reverse MC backup
+            G = 0.0
+            for sk, ac, r in reversed(self.paths[idx]):
+                G = r + self.gamma * G
+                self._ensure_qvec(sk)
+                self.Q[sk][ac] += self.alpha * (G - self.Q[sk][ac])
 
-        self.update_dff()
+            # remove agent data
+            self.positions = np.delete(self.positions, idx, axis=0)
+            self.prev_direction = np.delete(self.prev_direction, idx, axis=0)
+            del self.paths[idx]
 
-    # ---------------- Learning update ----------------
-    def _mc_update_and_remove(self, idx: int):
-        path = self.paths[idx]
-        G = 0.0
-        for state, action, reward in reversed(path):
-            G = reward + self.gamma * G
-            if state not in self.Q:
-                self.Q[state] = np.zeros(self.action_size, dtype=np.float32)
-            self.Q[state][action] += self.alpha * (G - self.Q[state][action])
+        # evolve DFF field
+        self._update_dff()
 
-        self.positions = np.delete(self.positions, idx, axis=0)
-        self.prev_direction = np.delete(self.prev_direction, idx, axis=0)
-        del self.paths[idx]
+        # finalize remaining agents if max_steps reached
+        if self._step_count >= int(self.params["max_steps"]) and self.positions.shape[0] > 0:
+            self.finalize_timeouts()
 
-    # ---------------- DFF evolution ----------------
-    def update_dff(self):
+    # -----------------------------
+    # Helpers
+    # -----------------------------
+    def _ensure_qvec(self, state_key: Tuple[bytes, Tuple[int, int]]) -> None:
+        if state_key not in self.Q:
+            self.Q[state_key] = np.zeros(self.action_size, dtype=np.float32)
+
+    @staticmethod
+    def _dir_to_from(x: int, y: int, tx: int, ty: int) -> int:
+        dx, dy = tx - x, ty - y
+        if dx == -1 and dy == 0:
+            return FloorFieldModel.FROM_DOWN   # coming from below to go up
+        if dx == 1 and dy == 0:
+            return FloorFieldModel.FROM_UP     # coming from above to go down
+        if dx == 0 and dy == -1:
+            return FloorFieldModel.FROM_RIGHT  # coming from right to go left
+        if dx == 0 and dy == 1:
+            return FloorFieldModel.FROM_LEFT   # coming from left to go right
+        return FloorFieldModel.FROM_SELF
+
+    def _update_dff(self) -> None:
         diffuse = float(self.params["diffuse"])
         decay = float(self.params["decay"])
+        H, W = self._H, self._W
 
-        new_dff = (1.0 - decay) * (1.0 - diffuse) * self.dff
-        padded = np.pad(new_dff, 1, mode="constant")
-
-        denom = len(self.neighbors)
-        coef = decay * (1.0 - diffuse) / denom
-        for dx, dy in self.neighbors:
-            new_dff += coef * padded[1 + dx:new_dff.shape[0] + 1 + dx,
-                                     1 + dy:new_dff.shape[1] + 1 + dy]
-        self.dff = new_dff
+        base = (1.0 - decay) * (1.0 - diffuse) * self.dff
+        padded = np.pad(base, 1, mode='constant')
+        acc = np.zeros_like(base)
+        # 8-neighborhood diffusion (Moore) for smoother footprint spread
+        neigh = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        for dx, dy in neigh:
+            acc += padded[1 + dx:H + 1 + dx, 1 + dy:W + 1 + dy]
+        acc *= decay * (1.0 - diffuse) / len(neigh)
+        self.dff = base + acc
         self.dff[self.dff < 1e-4] = 0.0
+
+    # -----------------------------
+    # Timeouts finalization
+    # -----------------------------
+    def finalize_timeouts(self) -> None:
+        """Force-finish the episode when step cap is reached.
+        - Append a timeout penalty to each remaining agent's path (STOP @ current cell)
+        - Monte Carlo backup for each, then remove all.
+        """
+        if self.positions.shape[0] == 0:
+            return
+        H, W = self._H, self._W
+        timeout_pen = float(self.params["timeout_penalty"])  # cost
+
+        # build current occupancy grid
+        occ_grid = np.zeros((H, W), dtype=np.bool_)
+        occ_grid[self.positions[:, 0], self.positions[:, 1]] = True
+
+        # finalize each remaining agent
+        for idx in range(self.positions.shape[0]):
+            x, y = int(self.positions[idx, 0]), int(self.positions[idx, 1])
+            combined = self._combined3x3_at_target(x, y, occ_grid, (x, y))
+            state_key = (combined.tobytes(), self._block_index(x, y))
+            self._ensure_qvec(state_key)
+
+            # push final timeout step (STOP at current cell)
+            self.paths[idx].append((state_key, FloorFieldModel.FROM_SELF, -timeout_pen))
+
+            # reverse MC backup
+            G = 0.0
+            for sk, ac, r in reversed(self.paths[idx]):
+                G = r + self.gamma * G
+                self._ensure_qvec(sk)
+                self.Q[sk][ac] += self.alpha * (G - self.Q[sk][ac])
+
+        # clear all remaining agents
+        self.positions = np.empty((0, 2), dtype=self.positions.dtype)
+        self.prev_direction = np.empty((0, 2), dtype=self.prev_direction.dtype)
+        self.paths = []
+
+    # -----------------------------
+    # Persistence
+    # -----------------------------
+    def save_Q(self, filepath: str) -> None:
+        with open(filepath, "wb") as f:
+            pickle.dump(self.Q, f)
