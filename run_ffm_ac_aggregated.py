@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FFM+AC（集約Actor版）の実行スクリプト。
-集約pklで行動し、CriticをTD学習で更新する。Actorは学習しない。
+集約pklを参照しつつ Actor・Critic 両方学習。Critic は常に 0 から学習。
 """
 
 import os
@@ -20,21 +20,20 @@ except ImportError:
 # 集約Actor pkl（inspect_actor_data.py の出力）
 AGGREGATED_H_PATH = os.path.join(
     "output", "logs", "unified_actor_training",
-    "run_20260119_070834", "H_actor_FINAL_total4500ep_by_dist_angle.pkl",
+    "learning_center_12", "H_actor_FINAL_total4500ep_by_dist_angle.pkl",
 )
-# 事前学習済みCritic（省略時は V は 0 から学習）
-PRETRAINED_V_PATH = os.path.join(
-    "output", "logs", "unified_critic_training",
-    "run_20260117_101523", "V_integrated_total70000ep.pkl",
-)
+# Critic は常に 0 から学習（事前学習 V は使わない）
+PRETRAINED_V_PATH = None
 
-MAP_PATH = "data/maps/simple_room_12x12.npy"
-SFF_PATH = "data/sff/distance_L1_12x12.npy"
+MAP_PATH = "data/maps/excel_map_006.npy"
+SFF_PATH = "data/sff/excel_map_006_L1.npy"
 
 # マップの約8割でキリの良い人数・単一設定
 FILL_RATIO = 0.8
-EPISODES = 100
-MAX_STEPS = 300
+EPISODES = 1000
+# 最大ステップ数: 最小100、最大 人数*3
+MAX_STEPS_MIN = 100
+MAX_STEPS_PER_AGENT = 3
 
 OUTPUT_DIR = "output/logs/ffm_ac_aggregated"
 
@@ -48,7 +47,7 @@ MODEL_PARAMS = {
     "step_penalty": -1.0,
     "collision_penalty": -1.0,
     "neighborhood": "neumann",
-    "block_size": 1,
+    "block_size": 5,
 }
 # ================================================
 
@@ -97,10 +96,7 @@ def main():
         return
 
     print("集約Actor: {}".format(AGGREGATED_H_PATH))
-    if PRETRAINED_V_PATH and os.path.isfile(PRETRAINED_V_PATH):
-        print("事前学習Critic: {}".format(PRETRAINED_V_PATH))
-    else:
-        print("事前学習Critic: なし（V は 0 から学習）")
+    print("Critic: 0 から学習")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -118,10 +114,11 @@ def main():
     n_agents = min(n_agents, available)
     if n_agents < 1:
         n_agents = 1
-    print("歩行可能セル: {} | 半径: {} | 人数(約{:.0f}%): {}\n".format(
-        available, max_radius, FILL_RATIO * 100, n_agents))
+    max_steps = max(MAX_STEPS_MIN, n_agents * MAX_STEPS_PER_AGENT)
+    print("歩行可能セル: {} | 半径: {} | 人数(約{:.0f}%): {} | "
+          "max_steps: {}\n".format(
+              available, max_radius, FILL_RATIO * 100, n_agents, max_steps))
 
-    pretrained_v = PRETRAINED_V_PATH if os.path.isfile(PRETRAINED_V_PATH) else None
     start_time = time.time()
 
     model = FloorFieldModelACAggregated(
@@ -129,20 +126,32 @@ def main():
         sff_path=SFF_PATH,
         N=n_agents,
         aggregated_h_path=AGGREGATED_H_PATH,
-        pretrained_v_path=pretrained_v,
+        pretrained_v_path=None,
         params=MODEL_PARAMS,
     )
 
     steps_list = []
     remaining_list = []
+    trajectory_interval = 10
     for ep in range(1, EPISODES + 1):
         model.reset(exit_pos=exit_pos, radius=max_radius)
-        steps = model.run(max_steps=MAX_STEPS)
+        if ep % trajectory_interval == 0:
+            steps, trajectory = model.run(
+                max_steps=max_steps, return_trajectory=True
+            )
+            traj_path = os.path.join(
+                run_dir, "trajectory_ep{:04d}.pkl".format(ep)
+            )
+            with open(traj_path, "wb") as f:
+                pickle.dump(trajectory, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print("  軌跡保存: {} ({} ステップ)".format(traj_path, len(trajectory)))
+        else:
+            steps = model.run(max_steps=max_steps)
         remaining = model.positions.shape[0]
         steps_list.append(steps)
         remaining_list.append(remaining)
 
-        if ep == 1 or ep % 20 == 0 or ep == EPISODES:
+        if ep == 1 or ep % 1 == 0 or ep == EPISODES:
             _, v_cur, _ = model.get_v_table_size()
             _, h_cur, _ = model.get_H_table_size()
             print(
