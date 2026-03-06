@@ -18,7 +18,7 @@ from model.ffm_unified import FloorFieldModelUnified
 # ==================== 設定パラメータ ====================
 # 半径の設定
 RADIUS_START = 3  # 開始半径
-RADIUS_END = 15  # 終了半径
+RADIUS_END = 21  # 終了半径
 RADIUS_STEP = 2  # 半径の刻み幅
 
 # 人数の設定
@@ -50,8 +50,8 @@ MODEL_PARAMS = {
 }
 
 # マップとSFFのパス
-MAP_PATH = "data/maps/simple_room_12x12.npy"
-SFF_PATH = "data/sff/distance_L1_12x12.npy"
+MAP_PATH = "data/maps/excel_map_007.npy"
+SFF_PATH = "data/sff/excel_map_007_L1.npy"
 # ========================================================
 
 
