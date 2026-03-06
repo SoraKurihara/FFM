@@ -4,5 +4,10 @@ __pycache__
 *.mp4
 *.yaml
 *.pkl
+*.xlsx
+*.gif
+*.txt
+*.pdf
+*.csv
 .venv/
 .vscode/
