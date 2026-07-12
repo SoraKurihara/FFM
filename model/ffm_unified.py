@@ -186,86 +186,66 @@ class FloorFieldModelUnified:
             ]
 
     def _encode_state(self, x, y, state_map):
-        """
-        上下左右ランク状態エンコーディング
-        - 上下左右の4方向に対して、各方向のランクを計算
-        - ランク0: 移動不可（壁や人がいる）
-        - ランク1: 斜め前に人がいる（左右問わない）
-        - ランク2: 二歩先が埋まっている（壁や人）
-        - ランク3: すべてに合致しない
-
-        Args:
-            x, y: エージェントの位置
-            state_map: マップ値配列（0:歩行可能, 1:歩行者, 2:壁, 3:出口）
-
-        Returns:
-            tuple: (ranks_tuple, block_idx_tuple) の形式でハッシュ可能なキー
-            ※ pickle.dumps は使用せず、純粋なタプルを返します
+        """上下左右ランクとブロックインデックス。
+        壁(0)と人(1)を区別する新しい仕様 (ランク0〜4の5段階)。
         """
         height, width = state_map.shape
         ranks = []
-
-        # 上下左右の4方向をチェック
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # 上、下、左、右
-
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)] # 上, 下, 左, 右
         for dx, dy in directions:
-            rank = 3  # デフォルトはランク3
-
-            # 1歩先（隣接セル）をチェック
+            # デフォルトは最も快適なランク4 (前方クリア)
+            rank = 4
             nx1, ny1 = x + dx, y + dy
-            if 0 <= nx1 < height and 0 <= ny1 < width:
-                val1 = state_map[nx1, ny1]
-                # 移動不可（壁(2)または人(1)）ならランク0
-                if val1 == 2 or val1 == 1:
-                    rank = 0
-                else:
-                    # 2. 斜め前をチェック（上方向なら、上のセルの左右）
-                    # 斜め前の座標を計算
-                    if dx != 0:  # 上下方向
-                        diag_left = (nx1, ny1 - 1)  # 斜め左
-                        diag_right = (nx1, ny1 + 1)  # 斜め右
-                    else:  # 左右方向
-                        diag_left = (nx1 - 1, ny1)  # 斜め上
-                        diag_right = (nx1 + 1, ny1)  # 斜め下
-
-                    # 斜め前に人がいるかチェック（左右問わない）
-                    has_person_diag = False
-                    for diag_x, diag_y in [diag_left, diag_right]:
-                        if 0 <= diag_x < height and 0 <= diag_y < width:
-                            if state_map[diag_x, diag_y] == 1:  # 人がいる
-                                has_person_diag = True
-                                break
-
-                    if has_person_diag:
-                        rank = 1
-                    else:
-                        # 3. 2歩先をチェック
-                        nx2, ny2 = x + 2 * dx, y + 2 * dy
-                        if 0 <= nx2 < height and 0 <= ny2 < width:
-                            val2 = state_map[nx2, ny2]
-                            # 壁(2)または人(1)ならランク2
-                            if val2 == 2 or val2 == 1:
-                                rank = 2
-                        else:
-                            # 境界外は壁として扱う
-                            rank = 2
+            
+            # --- 1歩先の判定 ---
+            # マップ外の場合
+            if not (0 <= nx1 < height and 0 <= ny1 < width):
+                # マップ外は「壁(ランク0)」扱いとする
+                rank = 0 
             else:
-                # 境界外は移動不可としてランク0
-                rank = 0
-
+                val1 = state_map[nx1, ny1]
+                # 壁(2) の場合
+                if val1 == 2:
+                    rank = 0
+                # 人(1) の場合
+                elif val1 == 1:
+                    rank = 1
+                
+                # --- 1歩先が空き (0 or 3) の場合 ---
+                else:
+                    # 斜め前の人判定 (横取りリスク) -> ランク2
+                    if dx != 0: # 上下移動の場合、左右斜めを見る
+                        diag_left, diag_right = (nx1, ny1 - 1), (nx1, ny1 + 1)
+                    else: # 左右移動の場合、上下斜めを見る
+                        diag_left, diag_right = (nx1 - 1, ny1), (nx1 + 1, ny1)
+                    
+                    has_person_diag = any(
+                        0 <= ax < height and 0 <= ay < width
+                        and state_map[ax, ay] == 1
+                        for ax, ay in [diag_left, diag_right]
+                    )
+                    
+                    if has_person_diag:
+                        rank = 2
+                    else:
+                        # --- 2歩先判定 ---
+                        nx2, ny2 = x + 2 * dx, y + 2 * dy
+                        # マップ内かつ2歩先が障害物(壁2か人1)の場合 -> ランク3
+                        if 0 <= nx2 < height and 0 <= ny2 < width:
+                            if state_map[nx2, ny2] in (2, 1):
+                                rank = 3
+                        # 2歩先がマップ外の場合、そこは「壁」なので詰まっているとみなす
+                        else:
+                            rank = 3
+            
             ranks.append(rank)
-
-        # --- 修正箇所: Numpy型を排除し、純粋なタプルを生成 ---
         
-        # 粗い位置情報（ブロックインデックス）
-        # x, y は Numpy 配列から来ているため、明示的に int() で変換
-        block_idx = (int(x // self.block_size), int(y // self.block_size))
-
-        # ranks も int のタプルに変換
+        # (ランク, ランク, ランク, ランク) のタプルにする
         ranks_tuple = tuple(int(r) for r in ranks)
-
-        # pickle.dumps ではなく、この構造そのものをキーとして返します
-        # 構造: ((rank0, rank1, ...), (bx, by))
+        # ザックリとした現在地 (ブロックインデックス)
+        block_idx = (int(x // self.block_size), int(y // self.block_size))
+        
+        # ((上, 下, 左, 右), (ブロックX, ブロックY)) を返す
         return (ranks_tuple, block_idx)
 
     def step(self):

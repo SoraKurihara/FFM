@@ -20,6 +20,10 @@ H_ACTOR_PATH = os.path.join(
 MAP_PATH = "data/maps/excel_map_001.npy"
 # 角度のビン幅（度）。例: 45 → 8方向に集約
 ANGLE_BIN_DEG = 45
+# 1セルあたりの実距離[m]
+CELL_SIZE_M = 0.5
+# 距離ビン幅[m]（ハードコード）
+DIST_BIN_M = 1.0
 # 集約結果の保存先（入力と同じディレクトリに同名ベースで _by_dist_angle.pkl を付与）
 OUTPUT_PKL_SUFFIX = "_by_dist_angle.pkl"
 
@@ -76,6 +80,20 @@ def distance_band(l1_dist, max_l1):
     if r <= 2.0 / 3.0:
         return 1
     return 2
+
+
+def distance_bin_m(l1_dist, bin_m=DIST_BIN_M, cell_size_m=CELL_SIZE_M):
+    """
+    出口からのL1距離（セル数）を、実距離[m]に換算して距離ビン（0,1,2,...）に変換。
+    例: cell_size_m=0.5, bin_m=1.0 のとき
+      l1=0 -> 0.0m -> bin 0 (0.0-1.0m)
+      l1=1 -> 0.5m -> bin 0
+      l1=2 -> 1.0m -> bin 1 (1.0-2.0m)
+    """
+    if bin_m <= 0:
+        return 0
+    dist_m = float(l1_dist) * float(cell_size_m)
+    return int(dist_m // float(bin_m))
 
 
 def angle_to_exit_deg(x, y, ex, ey):
@@ -147,11 +165,11 @@ def main():
     print("=" * 70)
     print("ファイル: {}\n".format(path))
 
-    # マップから出口と最大距離を取得（block_size=1 で block_idx = セル座標）
-    exit_pos, max_l1 = get_exit_and_max_distance(MAP_PATH)
+    # マップから出口を取得（block_size=1 で block_idx = セル座標）
+    exit_pos, _max_l1 = get_exit_and_max_distance(MAP_PATH)
     ex, ey = exit_pos
-    print("マップ: {}, 出口: {}, 最大L1距離: {}".format(MAP_PATH, exit_pos, max_l1))
-    print("距離帯: 0=1/3以内, 1=1/3~2/3, 2=2/3~")
+    print("マップ: {}, 出口: {}".format(MAP_PATH, exit_pos))
+    print("距離ビン: 1セル={}m, 幅={}m (bin=0,1,2,...)".format(CELL_SIZE_M, DIST_BIN_M))
     print("角度: 正面(出口方向)=0度, ビン幅={}度\n".format(ANGLE_BIN_DEG))
 
     data = load_h_table(path)
@@ -165,8 +183,8 @@ def main():
         print("（エントリがありません）")
         return
 
-    # (dist_band, angle_bin) -> list of H vectors（表示用）
-    # (ranks_tuple, dist_band, angle_bin) -> list of H vectors（保存用）
+    # (dist_bin, angle_bin) -> list of H vectors（表示用）
+    # (ranks_tuple, dist_bin, angle_bin) -> list of H vectors（保存用）
     n_bins = 360 // ANGLE_BIN_DEG
     groups = defaultdict(list)
     groups_detail = defaultdict(list)
@@ -184,43 +202,45 @@ def main():
             continue
         x, y = int(block_idx[0]), int(block_idx[1])
         l1 = abs(x - ex) + abs(y - ey)
-        d_band = distance_band(l1, max_l1)
+        d_bin = distance_bin_m(l1)
         ang = angle_to_exit_deg(x, y, ex, ey)
         a_bin = angle_bin_index(ang, ANGLE_BIN_DEG)
         h_vec = np.asarray(h_values, dtype=np.float64)
         if h_vec.size >= 5:
-            groups[(d_band, a_bin)].append(h_vec)
-            # 保存用: 周囲の状況(ranks_tuple), 距離帯, 角度ビン でグループ化
-            groups_detail[(ranks_tuple, d_band, a_bin)].append(h_vec)
+            groups[(d_bin, a_bin)].append(h_vec)
+            # 保存用: 周囲の状況(ranks_tuple), 距離ビン, 角度ビン でグループ化
+            groups_detail[(ranks_tuple, d_bin, a_bin)].append(h_vec)
 
     # 各グループで平均を計算
     summary = []
-    for (d_band, a_bin), vecs in sorted(groups.items()):
+    for (d_bin, a_bin), vecs in sorted(groups.items()):
         arr = np.array(vecs)
         mean_h = np.mean(arr, axis=0)
-        summary.append((d_band, a_bin, len(vecs), mean_h))
+        summary.append((d_bin, a_bin, len(vecs), mean_h))
 
     print("総状態数: {}".format(n_states))
-    print("集約グループ数: {} (距離帯0,1,2 x 角度ビン{})\n".format(len(summary), n_bins))
+    print("集約グループ数: {} (距離ビン x 角度ビン{})\n".format(len(summary), n_bins))
     print("-" * 100)
-    print("距離帯 | 角度ビン(中心度) | 状態数 | 平均H (上, 下, 左, 右, 待機) | 1位 | 2位")
+    print("距離[m] | 角度ビン(中心度) | 状態数 | 平均H (上, 下, 左, 右, 待機) | 1位 | 2位")
     print("-" * 100)
 
-    for d_band, a_bin, count, mean_h in summary:
+    for d_bin, a_bin, count, mean_h in summary:
         center_deg = (a_bin + 0.5) * ANGLE_BIN_DEG - 180
+        d_from = d_bin * DIST_BIN_M
+        d_to = (d_bin + 1) * DIST_BIN_M
         h_str = format_h_values(mean_h.tolist())
         (lbl1, val1), (lbl2, val2) = top2_actions(mean_h)
-        print("   {}   | {:7.1f}          | {:5d} | {} | {}={:.4f} | {}={:.4f}".format(
-            d_band, center_deg, count, h_str, lbl1, val1, lbl2, val2))
+        print("{:4.1f}-{:<4.1f} | {:7.1f}          | {:5d} | {} | {}={:.4f} | {}={:.4f}".format(
+            d_from, d_to, center_deg, count, h_str, lbl1, val1, lbl2, val2))
 
     print("-" * 100)
 
     # 集約結果を元pklと同様の key->value 形式で別ファイルに保存
-    # key = (周囲の状況=ranks_tuple, 距離帯, 角度ビン), value = [上, 下, 左, 右, 待機] の平均価値
+    # key = (周囲の状況=ranks_tuple, 距離ビン, 角度ビン), value = [上, 下, 左, 右, 待機] の平均価値
     out_dict = {}
-    for (ranks_tuple, d_band, a_bin), vecs in groups_detail.items():
+    for (ranks_tuple, d_bin, a_bin), vecs in groups_detail.items():
         mean_h = np.mean(np.array(vecs), axis=0)
-        out_dict[(ranks_tuple, d_band, a_bin)] = mean_h.tolist()
+        out_dict[(ranks_tuple, d_bin, a_bin)] = mean_h.tolist()
 
     out_dir = os.path.dirname(path)
     base = os.path.basename(path)

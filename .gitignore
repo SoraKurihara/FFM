@@ -9,5 +9,9 @@ __pycache__
 *.txt
 *.pdf
 *.csv
+*.png
 .venv/
 .vscode/
+# Google Drive アップロード用（credentials.json, token.json はコミットしない）
+credentials.json
+token.json

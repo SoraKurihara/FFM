@@ -19,14 +19,13 @@ except ImportError:
 # ==================== 設定 ====================
 # 集約Actor pkl（inspect_actor_data.py の出力）
 AGGREGATED_H_PATH = os.path.join(
-    "output", "logs", "unified_actor_training",
-    "learning_center_12", "H_actor_FINAL_total4500ep_by_dist_angle.pkl",
+    "output", "logs", "unified_actor_training", "H_actor_aggregated_3maps_by_distm_angle.pkl",
 )
 # Critic は常に 0 から学習（事前学習 V は使わない）
 PRETRAINED_V_PATH = None
 
-MAP_PATH = "data/maps/excel_map_006.npy"
-SFF_PATH = "data/sff/excel_map_006_L1.npy"
+MAP_PATH = "data/maps/excel_map_009.npy"
+SFF_PATH = "data/sff/excel_map_009_L1.npy"
 
 # マップの約8割でキリの良い人数・単一設定
 FILL_RATIO = 0.8
@@ -47,33 +46,52 @@ MODEL_PARAMS = {
     "step_penalty": -1.0,
     "collision_penalty": -1.0,
     "neighborhood": "neumann",
-    "block_size": 5,
+    "block_size": 1,
 }
 # ================================================
 
 
-def find_exit(map_array):
+def find_exits(map_array):
+    """すべての出口の座標リストを返す"""
     exits = np.argwhere(map_array == 3)
     if len(exits) == 0:
         raise ValueError("出口が見つかりません")
-    return (int(exits[0, 0]), int(exits[0, 1]))
+    # [(x1, y1), (x2, y2), ...] の形式で返す
+    return [(int(row), int(col)) for row, col in exits]
 
 
-def count_available_cells(map_array, exit_pos, radius):
-    ex, ey = exit_pos
+def count_available_cells(map_array, exit_positions, radius):
+    """複数の出口に対応した有効セル数のカウント"""
     free = np.argwhere(map_array == 0)
-    mask = np.abs(free[:, 0] - ex) + np.abs(free[:, 1] - ey) <= radius
-    return int(np.sum(mask))
+    if len(free) == 0:
+        return 0
+    
+    exits_array = np.array(exit_positions)
+    # 各フリーセルから全出口へのL1距離を計算
+    distances = np.abs(free[:, np.newaxis, 0] - exits_array[:, 0]) + \
+                np.abs(free[:, np.newaxis, 1] - exits_array[:, 1])
+    # 最も近い出口までの距離を取得
+    min_distances = np.min(distances, axis=1)
+    
+    return int(np.sum(min_distances <= radius))
 
 
-def walkable_cells_and_max_radius(map_array, exit_pos):
-    """歩行可能セル数と、出口から最も遠いセルまでのL1距離を返す。"""
+def walkable_cells_and_max_radius(map_array, exit_positions):
+    """歩行可能セル数と、最も遠いセルから『最寄りの出口』までのL1距離を返す"""
     walkable = np.argwhere((map_array == 0) | (map_array == 3))
     if len(walkable) == 0:
         return 0, 0
-    ex, ey = exit_pos
-    l1 = np.abs(walkable[:, 0] - ex) + np.abs(walkable[:, 1] - ey)
-    return len(walkable), int(np.max(l1))
+    
+    exits_array = np.array(exit_positions)
+    # ブロードキャストで一気に全セル⇔全出口の距離を計算
+    distances = np.abs(walkable[:, np.newaxis, 0] - exits_array[:, 0]) + \
+                np.abs(walkable[:, np.newaxis, 1] - exits_array[:, 1])
+    
+    # 各セルから一番近い出口までの距離のリスト
+    min_distances = np.min(distances, axis=1)
+    
+    # その中で最大のものがmax_radius
+    return len(walkable), int(np.max(min_distances))
 
 
 def round_to_nice(n):
@@ -105,10 +123,10 @@ def main():
 
     map_array = np.load(MAP_PATH)
     print("マップ: {}".format(MAP_PATH))
-    exit_pos = find_exit(map_array)
-    print("出口: {}".format(exit_pos))
+    exit_positions = find_exits(map_array)
+    print("出口リスト: {}".format(exit_positions))
 
-    available, max_radius = walkable_cells_and_max_radius(map_array, exit_pos)
+    available, max_radius = walkable_cells_and_max_radius(map_array, exit_positions)
     n_raw = available * FILL_RATIO
     n_agents = round_to_nice(n_raw)
     n_agents = min(n_agents, available)
@@ -134,7 +152,7 @@ def main():
     remaining_list = []
     trajectory_interval = 10
     for ep in range(1, EPISODES + 1):
-        model.reset(exit_pos=exit_pos, radius=max_radius)
+        model.reset(exit_pos=exit_positions, radius=max_radius)
         if ep % trajectory_interval == 0:
             steps, trajectory = model.run(
                 max_steps=max_steps, return_trajectory=True

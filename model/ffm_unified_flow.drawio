@@ -1,0 +1,276 @@
+<mxfile host="app.diagrams.net" modified="2025-02-14T00:00:00.000Z" agent="5.0" version="24.0.0" etag="ffm-unified-flow" type="device">
+  <diagram id="ffm-unified-init-run" name="init / run">
+    <mxGraphModel dx="1422" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <!-- ========== init ========== -->
+        <mxCell id="start" value="開始 (FloorFieldModelUnified)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_params" value="params 設定&#xa;(default_params + 引数)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="100" width="170" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_mode_check" value="learning_mode 検証&#xa;critic_only / actor_only / both" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="180" width="200" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_map_sff" value="map_array, SFF 読み込み&#xa;(critic_only: mmap / 他: inf→0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="330" y="280" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_dff_pos" value="DFF=0, N, positions&#xa;(initialize_agents), neighbors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="330" y="360" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_v" value="V: 事前学習ありなら読み込み&#xa;なければ defaultdict(0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="330" y="440" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_h" value="actor_only / both なら&#xa;H, alpha_h, epsilon 初期化" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="520" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="init_end" value="初期化完了" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="365" y="600" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <!-- init edges -->
+        <mxCell id="ie1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="start" target="init_params">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_params" target="init_mode_check">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_mode_check" target="init_map_sff">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_map_sff" target="init_dff_pos">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_dff_pos" target="init_v">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_v" target="init_h">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ie7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="init_h" target="init_end">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="ffm-unified-step" name="step()">
+    <mxGraphModel dx="1422" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="950" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <!-- step 開始 -->
+        <mxCell id="step_start" value="step() 開始" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="380" y="20" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_prep" value="move_requests, next_positions 初期化&#xa;state_map = map + 歩行者(1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="350" y="100" width="180" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_loop" value="各エージェント idx をループ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="190" width="170" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_encode" value="_encode_state(x,y,state_map)&#xa;→ state, all_coords, all_valid_mask" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="330" y="260" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_exit" value="隣に出口あり ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="340" width="170" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_exit_yes" value="出口へ移動を登録&#xa;will_exit[idx]=True&#xa;(actor時は actions 記録) continue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="600" y="330" width="160" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_mode" value="learning_mode ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="440" width="170" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_critic_score" value="critic_only:&#xa;score = -k_S*SFF + k_D*DFF&#xa;probs → 選択 → move_requests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="80" y="430" width="180" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_actor_score" value="actor_only / both:&#xa;score = -k_A*H + k_D*DFF&#xa;probs, ε-greedy → 選択&#xa;move_requests, actions 記録" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="620" y="430" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_merge" value="ループ終了後" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="550" width="170" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_collision" value="衝突解決: move_requests を処理&#xa;next_positions 更新, DFF 加算&#xa;collision_counts 記録" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="330" y="620" width="220" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_state_next" value="state_map_next 作成&#xa;(next_positions で歩行者配置)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="710" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_td_mode" value="学習モードで TD 更新" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="790" width="170" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_critic_only" value="critic_only:&#xa;_update_critic のみ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="80" y="780" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_actor_only" value="actor_only:&#xa;_update_critic&#xa;_get_td_errors → td_errors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="380" y="880" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_both" value="both:&#xa;_update_critic&#xa;(return_td_errors=True)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="620" y="880" width="160" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_actor_update" value="actor_only / both かつ&#xa;td_errors あり → _update_actor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1000" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_remove" value="出口到達者を除外&#xa;positions = next_positions[keep_mask]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1080" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_dff" value="update_dff()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1160" width="140" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="step_end" value="step() 終了" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="375" y="1230" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <!-- step edges -->
+        <mxCell id="se1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_start" target="step_prep">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_prep" target="step_loop">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_loop" target="step_encode">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_encode" target="step_exit">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="step_exit" target="step_exit_yes">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se5l" value="Yes" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se5">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se5b" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="step_exit_yes" target="step_loop">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="680" y="210"/><mxPoint x="440" y="210"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_exit" target="step_mode">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se6l" value="No" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se6">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="step_mode" target="step_critic_score">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se7l" value="critic_only" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se7">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="step_mode" target="step_actor_score">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se8l" value="actor/both" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se8">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_critic_score" target="step_merge">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="170" y="550"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_actor_score" target="step_merge">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="710" y="550"/><mxPoint x="440" y="550"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="step_merge" target="step_loop">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="440" y="200"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se11l" value="次のエージェント" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se11">
+          <mxGeometry x="-0.2" y="-0.8" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_merge" target="step_collision">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se12l" value="全員処理済" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se12">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_collision" target="step_state_next">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_state_next" target="step_td_mode">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="step_td_mode" target="step_critic_only">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="440" y="820"/><mxPoint x="150" y="820"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se15l" value="critic_only" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se15">
+          <mxGeometry x="-0.2" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_td_mode" target="step_actor_only">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se16l" value="actor_only" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se16">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="step_td_mode" target="step_both">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se17l" value="both" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="se17">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="se18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_critic_only" target="step_actor_update">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="150" y="1025"/><mxPoint x="440" y="1025"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="se19" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_actor_only" target="step_actor_update">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="step_both" target="step_actor_update">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_actor_update" target="step_remove">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_remove" target="step_dff">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se23" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="step_dff" target="step_end">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="ffm-unified-run" name="run()">
+    <mxGraphModel dx="1422" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="500" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="run_start" value="run() 開始" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="370" y="20" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_while" value="positions にエージェントがいる&#xa;かつ step &lt; max_steps ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="340" y="100" width="180" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_step" value="step() 実行&#xa;buffer / trajectory に追加" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="200" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_save" value="save_prefix かつ&#xa;step % interval == 0 → 保存" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="350" y="280" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_final" value="buffer 残りがあれば&#xa;_final 保存" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="355" y="360" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_return" value="return step または&#xa;(step, trajectory)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="360" y="440" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="re1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="run_start" target="run_while">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="re2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="run_while" target="run_step">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="re2l" value="Yes" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="re2">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="re4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="run_step" target="run_save">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="re5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="run_while" target="run_final">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="re5l" value="No" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="re5">
+          <mxGeometry x="-0.1" y="-0.5" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="re6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="run_save" target="run_while">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="430" y="305"/><mxPoint x="430" y="135"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="re7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="run_final" target="run_return">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

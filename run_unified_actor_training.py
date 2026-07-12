@@ -28,11 +28,13 @@ except ImportError:
 # ※実際のパスに合わせて書き換えてください
 # PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260115_094311/V_integrated_total70000ep.pkl"
 # PRETRAINED_V_PATH = "output/logs/unified_critic_training/run_20260117_101523/V_integrated_total70000ep.pkl"
+PRETRAINED_V_PATH = "output/logs/unified_critic_training/learning_corner_ur_12/V_integrated_total100000ep.pkl"
 PRETRAINED_V_PATH = "output/logs/unified_critic_training/learning_corner_ul_12/V_integrated_total100000ep.pkl"
+PRETRAINED_V_PATH = "output/logs/unified_critic_training/learning_center_12/V_integrated_total100000ep.pkl"
 
 # 半径の設定
 RADIUS_START = 3  # 開始半径
-RADIUS_END = 21  # 終了半径
+RADIUS_END = 15  # 終了半径
 RADIUS_STEP = 2  # 半径の刻み幅
 
 # 人数の設定
@@ -71,8 +73,12 @@ MODEL_PARAMS = {
 }
 
 # マップとSFFのパス
-MAP_PATH = "data/maps/excel_map_007.npy"
-SFF_PATH = "data/sff/excel_map_007_L1.npy"
+MAP_PATH = "data/maps/learning_corner_ur_12.npy"
+SFF_PATH = "data/sff/learning_corner_ur_12_L1.npy"
+MAP_PATH = "data/maps/learning_corner_ul_12.npy"
+SFF_PATH = "data/sff/learning_corner_ul_12_L1.npy"
+MAP_PATH = "data/maps/learning_center_12.npy"
+SFF_PATH = "data/sff/learning_center_12_L1.npy"
 # ========================================================
 
 

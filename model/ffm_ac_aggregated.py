@@ -65,17 +65,34 @@ def _angle_bin_index(angle_deg, bin_deg=ANGLE_BIN_DEG):
     return int(a // bin_deg) % (360 // bin_deg)
 
 
-def _exit_and_max_l1(map_array):
-    """マップから出口位置と歩行可能セルでの最大L1距離を取得。"""
+def _exits_and_max_l1(map_array):
+    """マップからすべての出口位置と、歩行可能セルでの最寄り出口までの最大L1距離を取得。"""
     exits = np.argwhere(map_array == 3)
     if len(exits) == 0:
-        return (0, 6), 17
-    ex, ey = int(exits[0, 0]), int(exits[0, 1])
+        return [(0, 6)], 17
+    exit_list = [(int(r), int(c)) for r, c in exits]
+    
     walkable = np.argwhere((map_array == 0) | (map_array == 3))
     if len(walkable) == 0:
-        return (ex, ey), 0
-    l1 = np.abs(walkable[:, 0] - ex) + np.abs(walkable[:, 1] - ey)
-    return (ex, ey), int(np.max(l1))
+        return exit_list, 0
+        
+    exits_array = np.array(exit_list)
+    distances = np.abs(walkable[:, np.newaxis, 0] - exits_array[:, 0]) + \
+                np.abs(walkable[:, np.newaxis, 1] - exits_array[:, 1])
+    min_distances = np.min(distances, axis=1)
+    
+    return exit_list, int(np.max(min_distances))
+
+def _get_nearest_exit(x, y, exits):
+    """セル(x, y)から最も近い出口の座標と距離を返す"""
+    min_dist = float('inf')
+    nearest = exits[0]
+    for ex, ey in exits:
+        dist = abs(x - ex) + abs(y - ey)
+        if dist < min_dist:
+            min_dist = dist
+            nearest = (ex, ey)
+    return nearest, min_dist
 
 
 def _normalize_aggregated_key(key):
@@ -120,8 +137,7 @@ class FloorFieldModelACAggregated:
         )
 
         self.map_array = map_array.astype(np.uint8)
-        self.exit_pos, self.max_l1 = _exit_and_max_l1(self.map_array)
-        self.ex, self.ey = self.exit_pos
+        self.exit_positions, self.max_l1 = _exits_and_max_l1(self.map_array)
 
         sff_loaded = np.load(sff_path, mmap_mode="r")
         self.sff = np.where(np.isinf(sff_loaded), 0.0, sff_loaded).astype(
@@ -173,20 +189,28 @@ class FloorFieldModelACAggregated:
             self.V = defaultdict(lambda: 0.0)
             self.initial_v_size = 0
 
-    def initialize_agents(self, exit_pos=None, radius=None):
-        if exit_pos is None or radius is None:
+    def initialize_agents(self, exit_positions=None, radius=None):
+        if exit_positions is None or radius is None:
             free_cells = np.argwhere(self.map_array == 0)
             n = min(self.N, len(free_cells))
             if n == 0:
                 return np.empty((0, 2), dtype=np.int32)
             idx = np.random.choice(len(free_cells), n, replace=False)
             return free_cells[idx]
-        ex, ey = exit_pos
+        
         free_cells = np.argwhere(self.map_array == 0)
-        mask = (
-            np.abs(free_cells[:, 0] - ex) + np.abs(free_cells[:, 1] - ey)
-            <= radius
-        )
+        if len(free_cells) == 0:
+            return np.empty((0, 2), dtype=np.int32)
+
+        # リストで受け取った複数の出口をNumPy配列に変換
+        exits_array = np.array(exit_positions)
+        # 全フリーセル ⇔ 全出口の距離を一気に計算
+        distances = np.abs(free_cells[:, np.newaxis, 0] - exits_array[:, 0]) + \
+                    np.abs(free_cells[:, np.newaxis, 1] - exits_array[:, 1])
+        min_distances = np.min(distances, axis=1)
+        
+        # 最も近い出口からの距離がradius以下のセルを抽出
+        mask = min_distances <= radius
         rc = free_cells[mask]
         n = min(self.N, len(rc))
         if n == 0:
@@ -301,13 +325,13 @@ class FloorFieldModelACAggregated:
                 if len(h_vals) < len(all_coords):
                     h_vals = np.resize(h_vals, len(all_coords))
             else:
+                # エージェントから一番近い出口を計算
+                (nearest_ex, nearest_ey), nearest_dist = _get_nearest_exit(x, y, self.exit_positions)
                 agg_key = (
                     ranks_tuple,
-                    _distance_band(
-                        abs(x - self.ex) + abs(y - self.ey), self.max_l1
-                    ),
+                    _distance_band(nearest_dist, self.max_l1),
                     _angle_bin_index(
-                        _angle_to_exit_deg(x, y, self.ex, self.ey)
+                        _angle_to_exit_deg(x, y, nearest_ex, nearest_ey)
                     ),
                 )
                 if agg_key in self.H_aggregated:
@@ -461,8 +485,10 @@ class FloorFieldModelACAggregated:
         self.dff[self.dff < 1e-4] = 0
 
     def reset(self, exit_pos=None, radius=None):
+        # 実行スクリプトから渡された出口リスト(exit_pos)を、
+        # exit_positions引数としてinitialize_agentsに渡す
         self.positions = self.initialize_agents(
-            exit_pos=exit_pos, radius=radius
+            exit_positions=exit_pos, radius=radius
         )
         self.dff = np.zeros_like(self.map_array, dtype=np.float32)
 

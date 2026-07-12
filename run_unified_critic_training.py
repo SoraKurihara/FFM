@@ -50,8 +50,8 @@ MODEL_PARAMS = {
 }
 
 # マップとSFFのパス
-MAP_PATH = "data/maps/excel_map_007.npy"
-SFF_PATH = "data/sff/excel_map_007_L1.npy"
+MAP_PATH = "data/maps/learning_center_12.npy"
+SFF_PATH = "data/sff/learning_center_12_L1.npy"
 # ========================================================
 
 
